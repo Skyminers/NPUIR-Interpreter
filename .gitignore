@@ -1,0 +1,10 @@
+/build/
+/compile_commands.json
+/.cache/
+*.npy
+!test/functional/Inputs/*.npy
+*.trace
+*.log
+.DS_Store
+__pycache__/
+*.py[cod]
