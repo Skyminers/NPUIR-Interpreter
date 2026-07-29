@@ -12,7 +12,7 @@ AscendNPU-IR submodule，以及该 submodule 固定的 LLVM/MLIR 版本。
 ## 获取源码
 
 ```bash
-git clone --recursive <NPUIR-Interpreter 的 GitHub 地址>
+git clone --recursive https://github.com/Skyminers/NPUIR-Interpreter.git
 cd NPUIR-Interpreter
 ```
 
