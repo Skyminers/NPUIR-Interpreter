@@ -56,13 +56,13 @@ build/bin/npuir-interp kernel.mlir \
 
 ## 依赖版本
 
-AscendNPU-IR 通过 `third_party/AscendNPU-IR` submodule 固定到提交
-`4be8487e94f9d34657a0781aaa3d5e9532bfd9a3`；
+AscendNPU-IR 通过 `third_party/AscendNPU-IR` submodule 固定到 `feature/regbase`
+分支的提交 `5a744afc17c0caa6833cf04f773898450041ff98`；
 不要通过复制生成头文件或混用其他 LLVM 构建目录来替换它。升级依赖时应同时
 执行完整回归测试与低精度逐位扫描。
 
-该提交当前来自 `Sky_miner/AscendNPU-IR`。发布本仓库前，应先确认对应提交已
-推送到 `.gitmodules` 配置的远端，否则其他机器无法初始化 submodule。
+依赖来源为官方 `Ascend/AscendNPU-IR` 仓库。submodule 记录的是固定提交，
+`feature/regbase` 仅用于说明版本来源；升级依赖后应提交新的 gitlink。
 
 ## License
 

@@ -1,3 +1,4 @@
 [submodule "third_party/AscendNPU-IR"]
 	path = third_party/AscendNPU-IR
-	url = https://gitcode.com/Sky_miner/AscendNPU-IR.git
+	url = https://gitcode.com/Ascend/AscendNPU-IR.git
+	branch = feature/regbase
