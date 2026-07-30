@@ -1,0 +1,15 @@
+CompileFlags:
+  CompilationDatabase: build
+
+Index:
+  Background: Build
+
+---
+If:
+  PathMatch:
+    - third_party/.*
+    - build/.*
+Index:
+  # Dependency and generated files are still parsed when opened or included,
+  # but they do not need their own background-index jobs for this project.
+  Background: Skip
