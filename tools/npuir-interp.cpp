@@ -8,7 +8,7 @@
 //
 // Runs memref-form HIVM (NPUIR) on the host, both as a numerical reference
 // and - more importantly - as a checker for the synchronisation the compiler
-// inserted. See docs/BiShengIRInterp.md.
+// inserted. See docs/Architecture.md.
 //
 //===----------------------------------------------------------------------===//
 

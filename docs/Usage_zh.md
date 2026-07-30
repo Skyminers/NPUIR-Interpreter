@@ -1,5 +1,7 @@
 # `npuir-interp` 使用指南
 
+[返回文档索引](README.md) · [架构与实现](Architecture_zh.md)
+
 在没有昇腾硬件的机器上，把编译后的 HIVM（NPUIR）跑起来。
 
 它做两件事，**第一件是别的工具做不到的**：
@@ -8,7 +10,8 @@
 2. **查数值**——无硬件跑通 kernel，和 numpy / torch 的 golden 比对。
 
 > 想了解**为什么**这样设计（延迟提交模型、PIPE_S 建模、向量时钟等），
-> 看 `docs/BiShengIRInterp_zh.md`。本文只讲**怎么用**。
+> 想了解**为什么**这样设计（延迟提交模型、PIPE_S 建模、向量时钟等），
+> 请阅读[架构与实现](Architecture_zh.md)。本文只讲**怎么用**。
 
 ---
 
@@ -284,11 +287,11 @@ python3 sweep_lowprec.py     # bf16 与两种 f8
 ```
 
 每个脚本逐 op 打一行，有任何不一致就非 0 退出。它们至今抓出过 4 个缺陷，共同点是
-**算出来的数看起来完全合理**。细节见该目录的 `README.md`。
+**算出来的数看起来完全合理**。细节见[精度扫描说明](../test/Precision/README.md)。
 
 回归套本身：
 
 ```bash
-cmake --build build --target check-npuir-interpreter       # 48 个用例
-cmake --build build --target check-npuir-interpreter-unit  # 46 个单元测试
+cmake --build build --target check-npuir-interpreter
+cmake --build build --target check-npuir-interpreter-unit
 ```

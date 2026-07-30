@@ -1,5 +1,7 @@
 # `npuir-interp` —— NPUIR (HIVM) CPU 解释器
 
+[返回文档索引](README.md) · [使用指南](Usage_zh.md) · [English](Architecture.md)
+
 > 在没有昇腾硬件的情况下，把编译后的 memref 形态 HIVM IR 跑在主机上。
 
 ---
@@ -111,7 +113,7 @@ hivm.hir.store ins(%ub) outs(%gm)
 **标记合并**：一个标量循环逐元素写 buffer，会一个元素压一个标记。所以相邻/重叠、
 同一个 op、同一方向、同一 arena 的标记会合并成一个区间（只向队尾回看 8 项，且不跨
 token —— 跨过去会让 `wait_flag` 提前把后面的访问退休掉）。合并规则由
-`unittests/Tools/Interp/PipeEngineTest.cpp` 直接覆盖。合并不掉的散乱访问有一个
+`unittests/PipeEngineTest.cpp` 直接覆盖。合并不掉的散乱访问有一个
 4096 条的上限，超过就丢弃并**打一次 warning**：宁可漏报也不能凭空加宽区间去误报。
 
 ### 2.4 宏 op 的两段建模
@@ -480,7 +482,7 @@ test/oob/          期望越界 / 超容量报错
 test/layout/       期望 layout 标签不匹配
 test/errors/       期望明确拒绝，而不是给个错答案
 test/Precision/    逐位精度扫描（开发工具，lit 不收）
-unittests/Tools/Interp/   ShadowMemory / VectorClock / MemRefValue / 驻留标记合并的 gtest
+unittests/          ShadowMemory / VectorClock / MemRefValue / 驻留标记合并的 gtest
 ```
 
 **每一个检查能力都必须有一个"故意写错的 IR"用例。** 只有正向用例的检查器，和一个
@@ -533,13 +535,10 @@ unittests/Tools/Interp/   ShadowMemory / VectorClock / MemRefValue / 驻留标�
    命中。**只在默认调度下才成立的检查器不算检查器。**
 
 3. **精度扫描**：改动任何算术路径之后跑一遍 `test/Precision/`（见 §5.1），
-   三个脚本都必须报 0 个不一致。
+   四个脚本都必须报 0 个不一致。
 
-当前基线：48 个 lit 用例、46 个 gtest 全绿；121 个输出 buffer 在 inorder / lazy 下
-逐字节一致；48 × 16 个 (用例, seed) 组合没有一个凭空多出或丢失诊断；四个精度扫描
-（f16 与 f32 的二元边界值两两组合、全部 65536 个 f16 位模式、整数回绕与移位边界、
-bf16 与 f8 的全部转换）
-全部逐位一致；解释器全部源码用 ASan 单独编译后重跑同一套扫描无报告。
+仓库内的 lit 与 gtest 套件是稳定的回归基线。四个精度扫描耗时更长，因此作为独立的
+开发者检查保留，不混入普通回归套件。
 
 ---
 
@@ -605,7 +604,7 @@ tools/
 | `collectRanges` 会放大 | 超过约 1024 行的非连续视图退化为整段区间，可能过报共享 |
 | `--exact-layout` 未实现 | 只有阶段一的标签检查 |
 | 整问题宏 matmul 未注册 | 故意报错而不是算错 |
-| f8 格式未测 | 编解码路径存在，但没有用例 |
+| f8 硬件行为未验证 | 两种 f8 的转换与边界已有回归和逐位扫描，但溢出约定尚未与真机核对 |
 | PlanMemory 之前的 MIX IR | 裸 `memref.alloc()` 没有烘焙偏移，AIC 与 AIV 的分配无法被识别为同一块 UB —— IR 里本来就没写它们别名 |
 
 ---

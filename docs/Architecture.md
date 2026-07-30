@@ -1,5 +1,7 @@
 # `npuir-interp` — NPUIR (HIVM) CPU interpreter
 
+[Documentation index](README.md) · [中文](Architecture_zh.md)
+
 `npuir-interp` executes **memref-form HIVM IR** on the host. It exists for
 two reasons, in priority order:
 
@@ -475,10 +477,9 @@ checks:
 - **Precision.** After any change to an arithmetic path, run the four sweeps
   under `test/Precision/`; each must report zero mismatches.
 
-Current baseline: 48 lit tests and 46 gtest cases green; 121 output buffers
-byte-identical between `inorder` and `lazy`; 48 x 16 (test, seed) combinations
-with no finding gained or lost; all four precision sweeps bit-exact; the same
-sweeps clean under an AddressSanitizer build of the interpreter sources.
+The checked-in lit and gtest suites are the stable regression baseline. The
+precision sweeps are intentionally separate because they are slower developer
+checks rather than ordinary regressions.
 
 ## Determinism
 
