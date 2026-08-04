@@ -296,15 +296,6 @@ ExecResult issueLayoutCopy(Interpreter &interp, CoreState &core, Operation *op,
     dst.layout = resultTag;
   }
 
-  // The element counts must match; the fractal blocking is what differs, and
-  // that is precisely what stage 1 abstracts away.
-  if (src.getNumElements() != dst.getNumElements()) {
-    interp.emitError(op) << "layout conversion between buffers of "
-                         << src.getNumElements() << " and "
-                         << dst.getNumElements() << " elements";
-    return ExecResult::Error;
-  }
-
   SmallVector<ByteRange, 4> reads, writes;
   interp.collectRanges(src, reads);
   interp.collectRanges(dst, writes);
@@ -312,14 +303,45 @@ ExecResult issueLayoutCopy(Interpreter &interp, CoreState &core, Operation *op,
   Interpreter *interpPtr = &interp;
   interp.issueEffect(core, pipe, op, reads, writes,
                      [interpPtr, op, src, dst]() {
-                       int64_t count = dst.getNumElements();
-                       for (int64_t n = 0; n < count; ++n) {
+                       // Rank-4 fractal views describe physical strides. In
+                       // stage-1 layout mode their bytes instead stay in
+                       // dense logical order; only the layout tag changes.
+                       auto logicalStorage = [](MemRefValue mem) {
+                         if (mem.getRank() != 4)
+                           return mem;
+                         int64_t stride = 1;
+                         for (int64_t d = mem.getRank() - 1; d >= 0; --d) {
+                           mem.strides[d] = stride;
+                           stride *= mem.sizes[d];
+                         }
+                         return mem;
+                       };
+                       MemRefValue logicalSrc = logicalStorage(src);
+                       MemRefValue logicalDst = logicalStorage(dst);
+                       int64_t srcCount = logicalSrc.getNumElements();
+                       int64_t dstCount = logicalDst.getNumElements();
+                       const llvm::fltSemantics *sem =
+                           getFloatSemantics(logicalDst.elemType);
+                       RuntimeValue zero = sem
+                                               ? RuntimeValue::getFloat(
+                                                     llvm::APFloat::getZero(*sem))
+                                               : RuntimeValue::getInt(llvm::APInt(
+                                                     logicalDst.elemBytes * 8,
+                                                     0));
+                       for (int64_t n = 0; n < dstCount; ++n) {
                          RuntimeValue value;
-                         if (!rawLoad(*interpPtr, src, n, op, value))
-                           return;
-                         value = convertForCopy(value, src.elemType,
-                                                dst.elemType);
-                         if (!rawStore(*interpPtr, dst, n, op, value))
+                         if (n < srcCount) {
+                           if (!rawLoad(*interpPtr, logicalSrc, n, op, value))
+                             return;
+                           value = convertForCopy(value, logicalSrc.elemType,
+                                                  logicalDst.elemType);
+                         } else {
+                           // A tail ND tile occupies a whole fractal block.
+                           // Stage-1 logical layout represents that padding as
+                           // trailing zeroes rather than physical NZ holes.
+                           value = zero;
+                         }
+                         if (!rawStore(*interpPtr, logicalDst, n, op, value))
                            return;
                        }
                      });

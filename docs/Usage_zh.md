@@ -52,6 +52,11 @@ fi
 解释器只接受 **bufferization 之后**的 IR。喂 tensor 形态的 IR 会得到一句明确的
 报错，而不是莫名其妙的 "unbound operand"。
 
+如果要使用 `lazy` / `fuzz` 检查同步，输入还必须位于 HIVM 本核
+`GraphSyncSolver` / `InjectSync` **之后**。某些中间 dump 已经完成 PlanMemory 和
+跨核同步，但本核 `set_flag` / `wait_flag` 尚未物化；它们可以用 `inorder` 查数值，
+不能直接把 `lazy` 的告警解释为最终硬件 IR 缺同步。
+
 典型的取 IR 方式：给 `bishengir-compile` 加 `--bishengir-print-ir-after=<pass>`，
 把某个 pass 之后的 IR 存下来。
 
@@ -89,8 +94,8 @@ fi
 
 ### 最强的自动判据：差分
 
-同一份 IR 用 `inorder` 和 `lazy` 各跑一遍，**输出逐字节相同 ⇒ 同步是充分的；
-不同 ⇒ 一定漏了同步。** 不需要 golden 数据，也不需要人看：
+对已经经过本核同步 pass 的 IR，用 `inorder` 和 `lazy` 各跑一遍，**输出逐字节相同
+⇒ 已物化的同步是充分的；不同 ⇒ 同步有缺失。** 不需要 golden 数据，也不需要人看：
 
 ```bash
 build/bin/npuir-interp kernel.mlir --args=a.npy,b.npy,zeros --sched=inorder --out=io.
@@ -253,7 +258,7 @@ cmp io.arg2.npy lz.arg2.npy
 | `unsupported op: <name>` | 这个 op 还没实现。**故意报错而不是猜一个结果** —— 明确的空缺比悄悄算错好 |
 | `ub capacity exceeded: need N more bytes, arena is M bytes and K are already in use` | 真的放不下（那就是被抓到的 bug），或者要调 `--ub-size` |
 | `out of bounds access to gm at byte N (arena capacity M, element size E)` | 地址算错了。越界**一律致命**，因为那条访问根本没法执行 |
-| 报了一堆 `MISSING SYNC` 但你确信 IR 是对的 | 先用 `--sched=inorder` 确认数值对不对；如果对，再看报告点的 pipe 对不对 |
+| 报了一堆 `MISSING SYNC` 但你确信 IR 是对的 | 先确认 dump 位于 `GraphSyncSolver` / `InjectSync` 之后；若是更早阶段，只用 `inorder`，或先补跑本核同步 pass |
 | 跑很久不结束 | 调低 `--max-steps` 看它卡在哪，或者加 `--trace=t.log` |
 
 ---

@@ -24,6 +24,7 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Matchers.h"
 
 #include <cmath>
@@ -100,6 +101,49 @@ bool materializeConstant(Interpreter &interp, Attribute attr, Type type,
   }
   interp.emitError(op) << "unsupported constant attribute";
   return false;
+}
+
+/// Evaluate an affine.apply after all of its dimension and symbol operands
+/// have become concrete runtime indices.
+ExecResult execAffineApply(Interpreter &interp, CoreState &core,
+                           Operation *op) {
+  auto mapAttr = op->getAttrOfType<AffineMapAttr>("map");
+  if (!mapAttr) {
+    interp.emitError(op) << "affine.apply is missing its map attribute";
+    return ExecResult::Error;
+  }
+
+  AffineMap map = mapAttr.getValue();
+  if (map.getNumInputs() != op->getNumOperands()) {
+    interp.emitError(op) << "affine.apply operand count does not match its map";
+    return ExecResult::Error;
+  }
+
+  SmallVector<Attribute, 4> operands;
+  operands.reserve(op->getNumOperands());
+  Type indexType = IndexType::get(op->getContext());
+  for (Value operand : op->getOperands()) {
+    int64_t value = 0;
+    if (!getIndex(interp, core, operand, op, value))
+      return ExecResult::Error;
+    operands.push_back(IntegerAttr::get(indexType, value));
+  }
+
+  SmallVector<Attribute, 2> results;
+  bool hasPoison = false;
+  if (failed(map.constantFold(operands, results, &hasPoison)) || hasPoison ||
+      results.size() != op->getNumResults()) {
+    interp.emitError(op) << "could not evaluate affine.apply map";
+    return ExecResult::Error;
+  }
+
+  SmallVector<RuntimeValue, 2> values;
+  values.reserve(results.size());
+  for (Attribute result : results)
+    values.push_back(
+        RuntimeValue::getIndex(cast<IntegerAttr>(result).getInt()));
+  bindResults(interp, core, op, values);
+  return ExecResult::Advance;
 }
 
 //===----------------------------------------------------------------------===//
@@ -891,20 +935,14 @@ ExecResult execMemRefRetype(Interpreter &interp, CoreState &core,
   return ExecResult::Advance;
 }
 
-/// Reshapes keep the byte offset and recompute a dense stride vector. The
-/// interpreter only supports reshapes of contiguous views, which is what
-/// bufferization produces.
+/// Reshapes keep the byte offset. Dense views get dense result strides;
+/// strided views are supported when the result type declares every stride.
 ExecResult execReshape(Interpreter &interp, CoreState &core, Operation *op,
                        bool expanding) {
   MemRefValue source;
   if (!interp.getMemRefOperand(core, op->getOperand(0), source, op))
     return ExecResult::Error;
   auto resultType = cast<MemRefType>(op->getResult(0).getType());
-  if (!source.isContiguous()) {
-    interp.emitError(op)
-        << "reshape of a non-contiguous memref is not supported";
-    return ExecResult::Error;
-  }
 
   MemRefValue result = source;
   result.sizes.assign(resultType.getShape().begin(),
@@ -951,11 +989,28 @@ ExecResult execReshape(Interpreter &interp, CoreState &core, Operation *op,
   if (dynDims.size() == 1 && known > 0)
     result.sizes[dynDims.front()] = source.getNumElements() / known;
 
-  result.strides.resize(result.sizes.size());
-  int64_t acc = 1;
-  for (int64_t d = static_cast<int64_t>(result.sizes.size()) - 1; d >= 0; --d) {
-    result.strides[d] = acc;
-    acc *= result.sizes[d];
+  int64_t layoutOffset = 0;
+  SmallVector<int64_t> declaredStrides;
+  bool hasStaticStrides =
+      succeeded(getStridesAndOffset(resultType, declaredStrides,
+                                    layoutOffset)) &&
+      llvm::none_of(declaredStrides,
+                    [](int64_t stride) { return ShapedType::isDynamic(stride); });
+  if (hasStaticStrides) {
+    result.strides.assign(declaredStrides.begin(), declaredStrides.end());
+  } else {
+    if (!source.isContiguous()) {
+      interp.emitError(op) << "reshape of a non-contiguous memref requires "
+                              "static result strides";
+      return ExecResult::Error;
+    }
+    result.strides.resize(result.sizes.size());
+    int64_t acc = 1;
+    for (int64_t d = static_cast<int64_t>(result.sizes.size()) - 1; d >= 0;
+         --d) {
+      result.strides[d] = acc;
+      acc *= result.sizes[d];
+    }
   }
   (void)expanding;
   interp.setValue(core, op->getResult(0), RuntimeValue::getMemRef(result));
@@ -1117,6 +1172,8 @@ ExecResult execGEP(Interpreter &interp, CoreState &core, Operation *op) {
 //===----------------------------------------------------------------------===//
 
 void registerCommunityOps(OpRegistry &registry) {
+  registry.add("affine.apply", execAffineApply);
+
   // --- func / control flow ---
   registry.add("func.return", execReturn);
   registry.add("func.call", execCall);

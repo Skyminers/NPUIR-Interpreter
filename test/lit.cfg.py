@@ -1,6 +1,7 @@
 # -*- Python -*-
 
 import os
+import sys
 
 import lit.formats
 from lit.llvm import llvm_config
@@ -15,11 +16,12 @@ config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.npuir_interpreter_obj_root, "test")
 
 llvm_config.use_default_substitutions()
+config.substitutions.append(("%python", sys.executable))
 llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 llvm_config.with_environment("PATH", config.npuir_interpreter_tools_dir,
                              append_path=True)
 llvm_config.add_tool_substitutions(
-    ["npuir-interp", "FileCheck", "count", "not"],
+    ["npuir-interp", "bishengir-compile", "FileCheck", "count", "not"],
     [config.npuir_interpreter_tools_dir, config.llvm_tools_dir])
 
 config.environment["FILECHECK_OPTS"] = (

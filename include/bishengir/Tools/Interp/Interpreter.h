@@ -28,6 +28,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <array>
 #include <functional>
 #include <map>
 #include <memory>
@@ -294,9 +295,22 @@ struct CrossFlagKey {
 };
 
 struct CrossFlagState {
-  int64_t count = 0;
-  VectorClock clock;
-  mlir::Operation *lastSetter = nullptr;
+  // AIC -> AIV is a broadcast generation: every vector sub-core may consume
+  // each generation once.
+  int64_t aicGeneration = 0;
+  VectorClock aicClock;
+  mlir::Operation *aicLastSetter = nullptr;
+  std::map<unsigned, int64_t> aivSeenAicGeneration;
+
+  // AIV -> AIC is an aggregate: the cube may consume one generation only
+  // after every vector sub-core in its scope has contributed a token.
+  std::map<unsigned, int64_t> aivCount;
+  std::map<unsigned, VectorClock> aivClock;
+  std::map<unsigned, mlir::Operation *> aivLastSetter;
+
+  // Kernels containing only one core kind keep ordinary semaphore semantics.
+  std::array<int64_t, 2> sameKindCount = {0, 0};
+  std::array<VectorClock, 2> sameKindClock;
 };
 
 /// Rendezvous state of one `hivm.hir.sync_block` site.

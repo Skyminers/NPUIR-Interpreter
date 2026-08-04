@@ -259,6 +259,93 @@ ExecResult execVTranspose(Interpreter &interp, CoreState &core, Operation *op) {
 // Matrix multiply
 //===----------------------------------------------------------------------===//
 
+/// Resolve the event ids that GraphSyncSolver embeds in `mmadL1`.  A missing
+/// list and -1 slots both mean that the corresponding synchronization stays
+/// entirely inside the library implementation.
+bool getMmadSyncArgs(Interpreter &interp, CoreState &core, Operation *op,
+                     ValueRange values,
+                     SmallVectorImpl<int64_t> &eventIds) {
+  eventIds.assign(7, -1);
+  if (values.empty())
+    return true;
+  if (values.size() != eventIds.size()) {
+    interp.emitError(op) << "mmadL1 sync_related_args must contain 7 values";
+    return false;
+  }
+  for (auto [index, value] : llvm::enumerate(values)) {
+    RuntimeValue runtime = interp.getValue(core, value);
+    if (!runtime.isInt()) {
+      interp.emitError(op) << "mmadL1 sync_related_args[" << index
+                           << "] is unbound";
+      return false;
+    }
+    eventIds[index] = runtime.getIndexValue();
+  }
+  return true;
+}
+
+/// Consume all enabled internal waits atomically.  Checking every event
+/// before decrementing any of them matters when a macro op has more than one
+/// dependency: if the second wait blocks, retrying the op must not consume the
+/// first event twice.
+ExecResult consumeMmadFlags(Interpreter &interp, CoreState &core,
+                            Operation *op, ArrayRef<FlagKey> flags) {
+  std::map<FlagKey, unsigned> required;
+  for (const FlagKey &key : flags)
+    ++required[key];
+
+  for (const auto &[key, count] : required) {
+    while (core.pipes.getFlagCount(key) < static_cast<int64_t>(count)) {
+      // An intra-core wait makes the setting pipe retire through its token.
+      // Do not consume the token yet: another required event may still block.
+      if (!interp.flushUntilToken(core, key.setPipe, key)) {
+        core.status = CoreStatus::BlockedOnFlag;
+        core.blockedOn.op = op;
+        core.blockedOn.what =
+            ("mmadL1 internal wait_flag[" + getPipeName(key.setPipe) +
+             ", " + getPipeName(key.waitPipe) + ", " + Twine(key.eventId) +
+             "]")
+                .str();
+        core.blockedOn.flagId = key.eventId;
+        return ExecResult::Block;
+      }
+    }
+  }
+
+  for (const auto &[key, count] : required) {
+    if (const VectorClock *published = core.pipes.getFlagClock(key))
+      core.clock.join(*published);
+    for (unsigned i = 0; i < count; ++i)
+      core.pipes.decFlag(key);
+  }
+  if (!required.empty()) {
+    core.clock.tick(core.index);
+    interp.setLastSyncOp(op);
+  }
+  return ExecResult::Advance;
+}
+
+/// Publish a flag from inside the macro op.  In lazy/fuzz mode it is queued
+/// immediately after the producing half of the operation, just like an
+/// explicit set_flag on that pipe.
+void publishMmadFlag(Interpreter &interp, CoreState &core, Operation *op,
+                     const FlagKey &key) {
+  core.clock.tick(core.index);
+  interp.setLastSyncOp(op);
+  if (interp.getOptions().sched == SchedMode::InOrder) {
+    core.pipes.incFlag(key, core.clock);
+    return;
+  }
+
+  Effect token;
+  token.op = op;
+  token.pipe = key.setPipe;
+  token.isToken = true;
+  token.token = key;
+  token.issueClock = core.clock;
+  core.pipes.push(key.setPipe, std::move(token));
+}
+
 /// The two halves of a local matmul. `mmad_l1` carries
 /// `MacroOpPipeTrait<MTE1, M>`: MTE1 stages the L1 tiles into L0A/L0B, then
 /// the cube multiplies them into L0C. Each half retires on its own pipe, so
@@ -360,7 +447,27 @@ struct MmadStaging {
 ExecResult execMmad(Interpreter &interp, CoreState &core, Operation *op,
                     Value aValue, Value bValue, Value cValue,
                     Value initCondition, bool transposeA, bool transposeB,
-                    Value realMValue, Value realKValue, Value realNValue) {
+                    Value realMValue, Value realKValue, Value realNValue,
+                    ValueRange syncRelatedArgs) {
+  SmallVector<int64_t, 7> syncEvents;
+  if (!getMmadSyncArgs(interp, core, op, syncRelatedArgs, syncEvents))
+    return ExecResult::Error;
+
+  SmallVector<FlagKey, 4> inputWaits;
+  if (syncEvents[0] >= 0)
+    inputWaits.push_back({Pipe::MTE2, Pipe::MTE1, syncEvents[0]});
+  if (syncEvents[1] >= 0)
+    inputWaits.push_back({Pipe::MTE2, Pipe::MTE1, syncEvents[1]});
+  // Slots 5/6 replace mma_tile's private M->MTE1 ping-pong events when the
+  // solver has hoisted their initial sets and final waits around macro ops.
+  if (syncEvents[5] >= 0)
+    inputWaits.push_back({Pipe::M, Pipe::MTE1, syncEvents[5]});
+  if (syncEvents[6] >= 0)
+    inputWaits.push_back({Pipe::M, Pipe::MTE1, syncEvents[6]});
+  ExecResult waitResult = consumeMmadFlags(interp, core, op, inputWaits);
+  if (waitResult != ExecResult::Advance)
+    return waitResult;
+
   MemRefValue a, b, c;
   if (isa<RankedTensorType>(aValue.getType())) {
     interp.emitError(op) << "tensor-form mmad: the interpreter only accepts "
@@ -371,8 +478,24 @@ ExecResult execMmad(Interpreter &interp, CoreState &core, Operation *op,
       !interp.getMemRefOperand(core, bValue, b, op) ||
       !interp.getMemRefOperand(core, cValue, c, op))
     return ExecResult::Error;
+
+  // Lowered cube IR exposes fractal storage as [N1, M1, M0, N0]. Stage-1
+  // layout mode keeps its contents in logical ND order, so present those
+  // buffers to the numerical kernel as dense [M, N] matrices.
+  auto normalizeFractal = [](MemRefValue &mem) {
+    if (mem.getRank() != 4)
+      return;
+    int64_t rows = mem.sizes[1] * mem.sizes[2];
+    int64_t cols = mem.sizes[0] * mem.sizes[3];
+    mem.sizes = {rows, cols};
+    mem.strides = {cols, 1};
+  };
+  normalizeFractal(a);
+  normalizeFractal(b);
+  normalizeFractal(c);
+
   if (a.getRank() != 2 || b.getRank() != 2 || c.getRank() != 2) {
-    interp.emitError(op) << "mmad expects rank-2 A, B and C";
+    interp.emitError(op) << "mmad expects rank-2 or rank-4 fractal A, B and C";
     return ExecResult::Error;
   }
 
@@ -422,6 +545,12 @@ ExecResult execMmad(Interpreter &interp, CoreState &core, Operation *op,
   interp.collectRanges(b, stageReads);
   interp.issueEffect(core, getOpInPipe(op, Pipe::MTE1), op, stageReads,
                      /*writes=*/{}, [state]() { state->stage(); });
+  if (syncEvents[2] >= 0)
+    publishMmadFlag(interp, core, op,
+                    {Pipe::MTE1, Pipe::MTE2, syncEvents[2]});
+  if (syncEvents[3] >= 0)
+    publishMmadFlag(interp, core, op,
+                    {Pipe::MTE1, Pipe::MTE2, syncEvents[3]});
 
   // Second half: the cube multiplies into L0C. The result becomes visible to
   // fixpipe only after an M->FIX flag.
@@ -431,6 +560,12 @@ ExecResult execMmad(Interpreter &interp, CoreState &core, Operation *op,
   interp.collectRanges(c, writes);
   interp.issueEffect(core, getOpPipe(op, Pipe::M), op, reads, writes,
                      [state]() { state->multiply(); });
+  if (syncEvents[5] >= 0)
+    publishMmadFlag(interp, core, op,
+                    {Pipe::M, Pipe::MTE1, syncEvents[5]});
+  if (syncEvents[6] >= 0)
+    publishMmadFlag(interp, core, op,
+                    {Pipe::M, Pipe::MTE1, syncEvents[6]});
   return ExecResult::Advance;
 }
 
@@ -471,7 +606,7 @@ void registerHIVMMiscOps(OpRegistry &registry) {
                                  typed.getATranspose().value_or(false),
                                  typed.getBTranspose().value_or(false),
                                  typed.getRealM(), typed.getRealK(),
-                                 typed.getRealN());
+                                 typed.getRealN(), typed.getSyncRelatedArgs());
                });
   registry.add(hivm::BatchMmadL1Op::getOperationName(),
                [](Interpreter &interp, CoreState &core, Operation *op) {
@@ -481,7 +616,7 @@ void registerHIVMMiscOps(OpRegistry &registry) {
                                  typed.getATranspose().value_or(false),
                                  typed.getBTranspose().value_or(false),
                                  typed.getRealM(), typed.getRealK(),
-                                 typed.getRealN());
+                                 typed.getRealN(), typed.getSyncRelatedArgs());
                });
   // hivm.hir.matmul / mix_matmul / mix_group_matmul are whole-problem macro
   // ops carrying tiling and epilogue parameters, not a single MAC over L1

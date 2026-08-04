@@ -428,6 +428,21 @@ void Interpreter::filterAndReportRace(RaceReport &race, int arena) {
   // Two hardware atomics on the same address are serialised by the hardware.
   if (race.first.atomic && race.second.atomic)
     return;
+  // SIMD vector sub-cores execute the same AIV program in lockstep while
+  // sharing one UB. Treating them as ordinary independent green threads
+  // turns deliberate shared scratch accesses into false races.
+  StringAttr parallelMode =
+      aivEntry ? aivEntry->getAttrOfType<StringAttr>("parallel_mode")
+               : StringAttr();
+  if (arenas[arena]->getSpace() == AddrSpace::UB && parallelMode &&
+      parallelMode.getValue() == "simd" &&
+      race.first.core < cores.size() && race.second.core < cores.size()) {
+    const CoreId &first = cores[race.first.core].id;
+    const CoreId &second = cores[race.second.core].id;
+    if (first.kind == CoreKind::AIV && second.kind == CoreKind::AIV &&
+        first.blockIdx == second.blockIdx)
+      return;
+  }
   race.space = arenas[arena]->getSpace();
   race.bufferName = arenas[arena]->describeAddress(race.lo);
   reportRace(race, lastSyncOp);
@@ -1335,9 +1350,28 @@ void Interpreter::reportLeaks() {
     }
   }
   for (auto &[key, state] : crossFlags) {
-    if (state.count != 0)
-      report() << "warning: cross-core flag " << key.str() << " left at "
-               << state.count << '\n';
+    for (unsigned kind = 0; kind < state.sameKindCount.size(); ++kind) {
+      if (state.sameKindCount[kind] == 0)
+        continue;
+      report() << "warning: cross-core flag " << key.str() << " from "
+               << getCoreKindName(static_cast<CoreKind>(kind)) << " left at "
+               << state.sameKindCount[kind] << '\n';
+    }
+    for (auto &[core, count] : state.aivCount)
+      if (count != 0)
+        report() << "warning: cross-core flag " << key.str()
+                 << " from vector core#" << core << " left at " << count
+                 << '\n';
+    for (const CoreState &candidate : cores) {
+      if (candidate.id.kind != CoreKind::AIV ||
+          (key.scope >= 0 && candidate.id.blockIdx != key.scope))
+        continue;
+      int64_t seen = state.aivSeenAicGeneration[candidate.index];
+      if (seen < state.aicGeneration)
+        report() << "warning: cross-core flag " << key.str()
+                 << " from cube left " << state.aicGeneration - seen
+                 << " generation(s) for " << candidate.id.str() << '\n';
+    }
   }
 }
 

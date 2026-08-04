@@ -175,9 +175,24 @@ ExecResult execSyncBlockSet(Interpreter &interp, CoreState &core,
   core.clock.tick(core.index);
 
   CrossFlagState &state = interp.getCrossFlags()[key];
-  ++state.count;
-  state.clock.join(core.clock);
-  state.lastSetter = op;
+  CoreKind opposite = core.id.kind == CoreKind::AIC ? CoreKind::AIV
+                                                     : CoreKind::AIC;
+  bool hasOpposite = llvm::any_of(interp.getCores(), [&](const CoreState &c) {
+    return c.id.kind == opposite;
+  });
+  if (!hasOpposite) {
+    unsigned kind = static_cast<unsigned>(core.id.kind);
+    ++state.sameKindCount[kind];
+    state.sameKindClock[kind].join(core.clock);
+  } else if (core.id.kind == CoreKind::AIC) {
+    ++state.aicGeneration;
+    state.aicClock.join(core.clock);
+    state.aicLastSetter = op;
+  } else {
+    ++state.aivCount[core.index];
+    state.aivClock[core.index].join(core.clock);
+    state.aivLastSetter[core.index] = op;
+  }
   // A core already parked on this flag will not re-test it on its own.
   interp.wakeWaitersOn(key.str());
   interp.noteProgress();
@@ -201,9 +216,39 @@ ExecResult execSyncBlockWait(Interpreter &interp, CoreState &core,
     return ExecResult::Error;
   key.scope = getFlagScope(waitOp.getTsyncInstrMode(), core.id);
 
+  // MIX flags are directional. Cube-to-vector is broadcast to every sub-core;
+  // vector-to-cube aggregates one contribution from every sub-core in scope.
+  CoreKind opposite = core.id.kind == CoreKind::AIC ? CoreKind::AIV
+                                                     : CoreKind::AIC;
+  bool hasOpposite = llvm::any_of(interp.getCores(), [&](const CoreState &c) {
+    return c.id.kind == opposite;
+  });
+
   auto &flags = interp.getCrossFlags();
   auto it = flags.find(key);
-  if (it == flags.end() || it->second.count <= 0) {
+  bool ready = false;
+  if (it != flags.end()) {
+    CrossFlagState &state = it->second;
+    if (!hasOpposite) {
+      unsigned kind = static_cast<unsigned>(core.id.kind);
+      ready = state.sameKindCount[kind] > 0;
+    } else if (core.id.kind == CoreKind::AIV) {
+      ready = state.aivSeenAicGeneration[core.index] < state.aicGeneration;
+    } else {
+      ready = true;
+      for (const CoreState &candidate : interp.getCores()) {
+        if (candidate.id.kind != CoreKind::AIV)
+          continue;
+        if (key.scope >= 0 && candidate.id.blockIdx != core.id.blockIdx)
+          continue;
+        if (state.aivCount[candidate.index] <= 0) {
+          ready = false;
+          break;
+        }
+      }
+    }
+  }
+  if (!ready) {
     core.status = CoreStatus::BlockedOnFlag;
     core.blockedOn.op = op;
     core.blockedOn.what = "sync_block_wait" + key.str();
@@ -212,8 +257,24 @@ ExecResult execSyncBlockWait(Interpreter &interp, CoreState &core,
     return ExecResult::Block;
   }
 
-  --it->second.count;
-  core.clock.join(it->second.clock);
+  CrossFlagState &state = it->second;
+  if (!hasOpposite) {
+    unsigned kind = static_cast<unsigned>(core.id.kind);
+    --state.sameKindCount[kind];
+    core.clock.join(state.sameKindClock[kind]);
+  } else if (core.id.kind == CoreKind::AIV) {
+    ++state.aivSeenAicGeneration[core.index];
+    core.clock.join(state.aicClock);
+  } else {
+    for (const CoreState &candidate : interp.getCores()) {
+      if (candidate.id.kind != CoreKind::AIV)
+        continue;
+      if (key.scope >= 0 && candidate.id.blockIdx != core.id.blockIdx)
+        continue;
+      --state.aivCount[candidate.index];
+      core.clock.join(state.aivClock[candidate.index]);
+    }
+  }
   core.clock.tick(core.index);
   core.status = CoreStatus::Runnable;
   interp.setLastSyncOp(op);

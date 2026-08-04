@@ -12,6 +12,12 @@ two reasons, in priority order:
 2. **Numerical reference.** Run a kernel without an Ascend device and compare
    against a numpy/torch golden.
 
+Lazy synchronisation checking assumes the input is from **after** the HIVM
+intra-core `GraphSyncSolver`/`InjectSync` pass. An earlier dump may already
+contain cross-core `sync_block_*` operations while its local `set_flag` and
+`wait_flag` operations have not been materialised yet; run that stage with
+`--sched=inorder`, or apply the intra-core sync pass before using `lazy`.
+
 ```
 npuir-interp kernel.mlir --sched=lazy --args=a.npy,b.npy,zeros --out=out.
 ```
@@ -45,10 +51,10 @@ the hardware would drain it. A missing flag then shows up three ways:
 | `lazy` (default) | Effects commit as late as the flush rules allow | The checking mode. |
 | `fuzz --seed=N` | Lazy plus randomised core interleaving | Shaking out fragile synchronisation. |
 
-**Differential testing is the strongest automatic signal:** run the same IR
-under `inorder` and `lazy` and compare the outputs. Identical means the
-synchronisation is sufficient; different means something is missing. Several
-tests in `test/` do exactly this with `cmp`.
+**For post-sync IR, differential testing is the strongest automatic signal:**
+run the same IR under `inorder` and `lazy` and compare the outputs. Identical
+means the materialised synchronisation is sufficient; different means
+something is missing. Several tests in `test/` do exactly this with `cmp`.
 
 ### Flush rules
 
@@ -108,20 +114,33 @@ result computed from the old tiles. Staging is idempotent, since a flush rule
 may drain the cube's queue without having drained MTE1 first, and hazard
 checking skips conflicts between an op and itself.
 
-### Cross-core flags are modelled as counting semaphores
+GraphSyncSolver may lower the flags around those two halves into the seven
+`sync_related_args` operands of `mmadL1`. Slots 0/1 wait for MTE2→MTE1 before
+staging A/B, slots 2/3 publish MTE1→MTE2 after staging, slot 4 controls the
+internal K-loop double-buffer choice, and slots 5/6 name the M→MTE1 ping-pong
+events hoisted around a group of mmads. The interpreter consumes and publishes
+those events at the corresponding staging/compute boundaries; treating the
+operands as inert metadata produces false missing-sync reports and deadlocks at
+the hoisted final waits.
+
+### Cross-core flags use MIX group generations
 
 A cross-core flag is keyed by `(scope, tpipe, pipe, flag_id)`, where `scope` is
-the block index — or global for `INTER_BLOCK_SYNCHRONIZATION`. The ordered
-`(tpipe, pipe)` pair is what tells a V→C flag apart from the C→V flag carrying
-the same id. `sync_block_set` adds one credit, `sync_block_wait` consumes one.
+the block index — or global for `INTER_BLOCK_SYNCHRONIZATION`. In a MIX kernel,
+direction comes from the producer and consumer core kinds:
 
-This matches the producer/consumer credit pattern real post-`GraphSyncSolver`
-IR uses for double buffering, where the same flag id is set and waited
-repeatedly around a loop. It is *not* a broadcast latch: with
-`--sub-block-num=2`, two sub-vector cores both waiting on a flag that was set
-once will leave the second one blocked. If your target's FFTS actually
-broadcasts a collected flag back to the whole group, that model needs
-revisiting; the default `--sub-block-num=1` avoids the question.
+- an AIC set publishes one generation that every AIV sub-core in scope may
+  consume once;
+- an AIV set contributes one credit from that sub-core, and an AIC wait becomes
+  ready only after every AIV sub-core in scope has contributed;
+- a kernel containing only one core kind retains ordinary counting-semaphore
+  behaviour.
+
+The aggregate wait joins every contributing AIV vector clock, while the
+broadcast generation carries the AIC clock to every consumer. This matches the
+group handshake in lowered SIMD MIX kernels, including repeated use of one flag
+id in a double-buffered loop. The exact FFTS contract has not been independently
+checked against hardware documentation.
 
 ---
 

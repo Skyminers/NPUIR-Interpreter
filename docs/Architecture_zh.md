@@ -20,6 +20,10 @@
 2. **数值正确性参考**
    无硬件跑通 kernel，与 numpy/torch golden 比对。
 
+`lazy` 同步检查要求输入位于 HIVM 本核 `GraphSyncSolver` / `InjectSync` **之后**。
+更早阶段的 dump 可能已经有跨核 `sync_block_*`，但本核 `set_flag` / `wait_flag` 尚未
+物化；这类 IR 应使用 `--sched=inorder`，或先运行本核同步 pass 再使用 `lazy`。
+
 ```bash
 npuir-interp kernel.mlir --sched=lazy --args=a.npy,b.npy,zeros --out=out.
 ```
@@ -56,8 +60,9 @@ npuir-interp kernel.mlir --sched=lazy --args=a.npy,b.npy,zeros --out=out.
 | `lazy`（默认） | effect 尽可能晚提交 | 检查模式 |
 | `fuzz --seed=N` | lazy + 随机化核间交错 | 找脆弱的同步 |
 
-**差分测试是最强的自动判据**：同一份 IR 分别用 `inorder` 和 `lazy` 跑，输出一致
-说明同步是充分的，不一致说明一定漏了同步。多个用例的 RUN 行直接用 `cmp` 做这件事。
+**对 pass 后 IR，差分测试是最强的自动判据**：同一份 IR 分别用 `inorder` 和
+`lazy` 跑，输出一致说明已经物化的同步是充分的，不一致说明有同步缺失。多个用例的
+RUN 行直接用 `cmp` 做这件事。
 
 ### 2.2 冲刷（flush）规则
 
@@ -143,18 +148,27 @@ f16 tile 是 128 KB。
 段自己补做 staging。两段属于同一个 `Operation *`，硬件本来就保证它们有序，所以
 `checkPipeHazards` 跳过 `pending.op == op` 的自我冲突。
 
-### 2.5 跨核 flag 建模为计数信号量
+GraphSyncSolver 还可能把这两段周围的 flag 降到 `mmadL1` 的 7 个
+`sync_related_args` 里：槽 0/1 在搬 A/B 前执行 MTE2→MTE1 wait，槽 2/3 在搬完后
+发布 MTE1→MTE2 set，槽 4 控制内部 K-loop 双缓冲选择，槽 5/6 是提升到一组
+mmad 外围的 M→MTE1 ping-pong event。解释器在 staging / compute 对应边界消费、发布
+这些 event；若把它们当成无语义的普通操作数，就会把正确 IR 误报成漏同步，并在外围
+最终 wait 处死锁。
+
+### 2.5 跨核 flag 建模为 MIX 组 generation
 
 跨核 flag 的 key 是 `(scope, tpipe, pipe, flag_id)`。`scope` 对 intra-block 和
-inter-subblock 是 block 号，对 `INTER_BLOCK_SYNCHRONIZATION` 是全局。有序的
-`(tpipe, pipe)` 对把 V→C 的 flag 和同号的 C→V flag 区分开。
-`sync_block_set` 加一个信用，`sync_block_wait` 消费一个。
+inter-subblock 是 block 号，对 `INTER_BLOCK_SYNCHRONIZATION` 是全局。在 MIX kernel
+里，方向由生产者和消费者的核类型决定：
 
-这与真实 post-`GraphSyncSolver` IR 里双缓冲的生产者/消费者信用模式一致（同一个
-flag id 在循环里反复 set / wait）。它**不是**广播式的锁存：`--sub-block-num=2`
-时，两个 sub-vector core 同时等一个只 set 过一次的 flag，第二个会一直阻塞。
-如果目标平台的 FFTS 实际上是把收齐的 flag 广播回整个 group，这个模型需要修正；
-默认 `--sub-block-num=1` 回避了这个问题。
+- AIC set 发布一个 generation，同 scope 的每个 AIV sub-core 都能各消费一次；
+- AIV set 提交该 sub-core 的一个信用，AIC wait 要等同 scope 的所有 AIV sub-core
+  都提交后才放行，并一次消费每个 sub-core 的一个信用；
+- 只有一种核类型的 kernel 仍使用普通计数信号量语义。
+
+汇聚 wait 会合并所有 AIV 生产者的向量时钟，广播 generation 则把 AIC 时钟带给每个
+消费者。这与 SIMD MIX kernel 降低后的组握手及循环复用同一 flag id 的形状一致；
+但尚未用硬件规格独立核对 FFTS 的精确契约。
 
 ### 2.6 barrier 的 rearm 与唤醒
 
@@ -600,7 +614,7 @@ tools/
 | PIPE_S 驻留标记有 4096 条上限 | 合并不掉的散乱标量访问超过上限就丢弃（打一次 warning），此后针对它们的漏 flag 会漏报（见 2.3） |
 | 跨核 flag 只按 `tpipe` 冲刷 | 消费侧的 `pipe` 不参与可见性建模；一个核内所有 pipe 共用一份向量时钟，所以"等错 pipe"这类 bug 抓不到 |
 | 标量的跨核可见性 | 标量写立即落内存，所以"用错 `tpipe` 发布标量结果"不会被发现 —— 真机上这需要 cache 维护，未建模 |
-| 跨核 flag 是计数信号量 | 不是 FFTS 广播锁存；未在硬件规格上验证（见 2.5） |
+| MIX 跨核 flag 的组语义 | AIC→AIV 按 generation 广播、AIV→AIC 按 sub-core 汇聚；由真实 SIMD kernel 形状推导，尚未用硬件规格独立验证（见 2.5） |
 | `collectRanges` 会放大 | 超过约 1024 行的非连续视图退化为整段区间，可能过报共享 |
 | `--exact-layout` 未实现 | 只有阶段一的标签检查 |
 | 整问题宏 matmul 未注册 | 故意报错而不是算错 |
