@@ -70,6 +70,16 @@ cmake --build build --target check-npuir-interpreter-unit
 cmake --build build --target check-npuir-interpreter-precision
 ```
 
+DSL 到解释器的端到端用例需要一个已安装 Triton Ascend 的 Python 环境：
+
+```bash
+TRITON_PYTHON=/path/to/triton-ascend/.venv/bin/python \
+  python3 test/run_dsl_e2e.py
+```
+
+该命令依次验证 `add`、`affine_abs`、`select` 和 `cast` 的 DSL → TTAdapter
+→ GraphSyncSolver HIVM → Interpreter 链路；可用 `--case select` 单独运行一个用例。
+
 ## 快速使用
 
 ```bash

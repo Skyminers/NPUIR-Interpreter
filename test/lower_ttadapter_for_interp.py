@@ -10,7 +10,9 @@ import tempfile
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Lower TTAdapter IR to the post-GraphSyncSolver HIVM module."
+    )
     parser.add_argument("compiler")
     parser.add_argument("input")
     parser.add_argument("output")
@@ -37,6 +39,8 @@ def main() -> int:
         ]
         result = subprocess.run(command, capture_output=True, text=True)
         dumps = sorted(tree_dir.rglob("*hivm-graph-sync-solver.mlir"))
+        # The downstream hivmc step may be unavailable on interpreter-only
+        # hosts. A unique pass dump proves that the stage we need completed.
         if len(dumps) != 1:
             sys.stderr.write(result.stdout)
             sys.stderr.write(result.stderr)
