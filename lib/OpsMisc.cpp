@@ -86,6 +86,57 @@ ExecResult execVBrc(Interpreter &interp, CoreState &core, Operation *op) {
   return ExecResult::Advance;
 }
 
+ExecResult execVArange(Interpreter &interp, CoreState &core, Operation *op) {
+  auto arangeOp = cast<hivm::VArangeOp>(op);
+  MemRefValue dst;
+  if (!interp.getMemRefOperand(core, arangeOp.getDst(), dst, op))
+    return ExecResult::Error;
+
+  int64_t offset = 0;
+  if (Value offsetValue = arangeOp.getOffset())
+    if (!getIndex(interp, core, offsetValue, op, offset))
+      return ExecResult::Error;
+
+  SmallVector<int64_t, 3> strides;
+  for (Value strideValue : arangeOp.getStrides()) {
+    int64_t stride = 0;
+    if (!getIndex(interp, core, strideValue, op, stride))
+      return ExecResult::Error;
+    strides.push_back(stride);
+  }
+  if (strides.size() != static_cast<size_t>(dst.getRank())) {
+    interp.emitError(op) << "varange has " << strides.size()
+                         << " strides for rank-" << dst.getRank()
+                         << " destination";
+    return ExecResult::Error;
+  }
+
+  SmallVector<ByteRange, 2> writes;
+  interp.collectRanges(dst, writes);
+  Interpreter *interpPtr = &interp;
+  Type i64Type = IntegerType::get(op->getContext(), 64);
+  interp.issueEffect(
+      core, getOpPipe(op, Pipe::V), op, {}, writes,
+      [interpPtr, op, dst, offset, strides, i64Type]() {
+        bool failed = false;
+        forEachIndex(dst.sizes, [&](ArrayRef<int64_t> index) {
+          if (failed)
+            return;
+          int64_t value = offset;
+          for (auto [coordinate, stride] : llvm::zip(index, strides))
+            value += coordinate * stride;
+          RuntimeValue integer = RuntimeValue::getInt(
+              llvm::APInt(64, static_cast<uint64_t>(value), true));
+          RuntimeValue converted =
+              convertValue(integer, i64Type, dst.elemType,
+                           InterpRoundMode::RINT, /*isUnsigned=*/false);
+          if (!rawStoreAt(*interpPtr, dst, index, op, converted))
+            failed = true;
+        });
+      });
+  return ExecResult::Advance;
+}
+
 //===----------------------------------------------------------------------===//
 // Reduce
 //===----------------------------------------------------------------------===//
@@ -169,22 +220,40 @@ ExecResult execVReduce(Interpreter &interp, CoreState &core, Operation *op) {
   hivm::ReduceOperation kind = reduceOp.getArith().getReduceOp();
   SmallVector<int64_t, 2> reduceDims(reduceOp.getReduceDims().begin(),
                                      reduceOp.getReduceDims().end());
+  RuntimeValue init;
+  Attribute initAttr = reduceOp.getInit();
+  if (auto intAttr = dyn_cast_or_null<IntegerAttr>(initAttr))
+    init = RuntimeValue::getInt(intAttr.getValue());
+  else if (auto floatAttr = dyn_cast_or_null<FloatAttr>(initAttr))
+    init = RuntimeValue::getFloat(floatAttr.getValue());
+  else {
+    interp.emitError(op) << "vreduce has no usable init value";
+    return ExecResult::Error;
+  }
+  bool dstAlreadyInitialized = op->hasAttr("already_initialize_init");
 
   SmallVector<ByteRange, 4> reads, writes;
   interp.collectRanges(src, reads);
-  // The destination also seeds the accumulator, so it is read as well.
-  interp.collectRanges(dst, reads);
+  if (dstAlreadyInitialized)
+    interp.collectRanges(dst, reads);
   interp.collectRanges(dst, writes);
 
   Interpreter *interpPtr = &interp;
   interp.issueEffect(
       core, getOpPipe(op, Pipe::V), op, reads, writes,
-      [interpPtr, op, src, dst, kind, reduceDims]() {
-        // Walk the full source; every element folds into the destination slot
-        // obtained by zeroing the reduced dimensions. The destination's
-        // current contents are the reduction's init value, per the ODS.
-        SmallVector<int64_t, 4> dstIndex;
+      [interpPtr, op, src, dst, kind, reduceDims, init,
+       dstAlreadyInitialized]() {
         bool failed = false;
+        if (!dstAlreadyInitialized) {
+          forEachIndex(dst.sizes, [&](ArrayRef<int64_t> index) {
+            if (!failed && !rawStoreAt(*interpPtr, dst, index, op, init))
+              failed = true;
+          });
+        }
+
+        // Walk the full source; every element folds into the destination slot
+        // obtained by zeroing the reduced dimensions.
+        SmallVector<int64_t, 4> dstIndex;
         forEachIndex(src.sizes, [&](ArrayRef<int64_t> index) {
           if (failed)
             return;
@@ -594,6 +663,7 @@ void registerHIVMMiscOps(OpRegistry &registry) {
 
   // --- shuffle / reduce ---
   registry.add(hivm::VBrcOp::getOperationName(), execVBrc);
+  registry.add(hivm::VArangeOp::getOperationName(), execVArange);
   registry.add(hivm::VReduceOp::getOperationName(), execVReduce);
   registry.add(hivm::VTransposeOp::getOperationName(), execVTranspose);
 

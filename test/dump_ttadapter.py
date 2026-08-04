@@ -1,91 +1,42 @@
 #!/usr/bin/env python3
-"""Compile a small Triton DSL kernel through the TTAdapter stage."""
+"""Compile one modular Triton DSL case through the TTAdapter stage."""
 
 import argparse
+import importlib
 import inspect
+import json
 import os
 import pathlib
+import sys
 
 import triton
-import triton.language as tl
 from triton.backends.compiler import GPUTarget
 from triton.compiler.compiler import ASTSource, make_backend
 
 
-@triton.jit
-def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(x_ptr + offsets, mask=mask)
-    y = tl.load(y_ptr + offsets, mask=mask)
-    tl.debug_barrier()
-    tl.store(out_ptr + offsets, x + y, mask=mask)
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+TEST_ROOT = ROOT / "test"
+CASES_DIR = TEST_ROOT / "dsl_e2e" / "cases"
+if str(TEST_ROOT) not in sys.path:
+    sys.path.insert(0, str(TEST_ROOT))
 
 
-@triton.jit
-def affine_abs_kernel(x_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
-    result = tl.abs(x - 4.0) * 2.0
-    tl.store(out_ptr + offsets, result, mask=mask)
+def case_names() -> list[str]:
+    return sorted(path.stem for path in CASES_DIR.glob("[!_]*.py"))
 
 
-@triton.jit
-def select_kernel(x_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
-    result = tl.where(x > 7.0, x, 7.0)
-    tl.store(out_ptr + offsets, result, mask=mask)
+def load_case(name: str):
+    if name not in case_names():
+        raise ValueError(f"unknown DSL E2E case: {name}")
+    module = importlib.import_module(f"dsl_e2e.cases.{name}")
+    case = module.CASE
+    if case.name != name:
+        raise RuntimeError(f"case module {name} declares name {case.name}")
+    return case
 
 
-@triton.jit
-def cast_kernel(x_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
-    result = (x * 0.5 + 0.75).to(tl.int32).to(tl.float32)
-    tl.store(out_ptr + offsets, result, mask=mask)
-
-
-CASES = {
-    "add": (
-        add_kernel,
-        {"x_ptr": "*fp32", "y_ptr": "*fp32", "out_ptr": "*fp32"},
-        1024,
-    ),
-    "affine_abs": (
-        affine_abs_kernel,
-        {"x_ptr": "*fp32", "out_ptr": "*fp32"},
-        1024,
-    ),
-    "select": (
-        select_kernel,
-        {"x_ptr": "*fp32", "out_ptr": "*fp32"},
-        32,
-    ),
-    "cast": (
-        cast_kernel,
-        {"x_ptr": "*fp32", "out_ptr": "*fp32"},
-        1024,
-    ),
-}
-
-
-def make_source(case: str) -> ASTSource:
-    kernel, pointer_args, block_size = CASES[case]
-    signature = {
-        **pointer_args,
-        "n_elements": "i32",
-        "BLOCK_SIZE": "constexpr",
-    }
-    constants = {"BLOCK_SIZE": block_size}
-
+def make_source(case_name: str) -> ASTSource:
+    case = load_case(case_name)
     # Triton renamed this argument in 3.3. Keep this test usable with both the
     # 3.2 Ascend release and newer source builds.
     keyword = (
@@ -93,17 +44,21 @@ def make_source(case: str) -> ASTSource:
         if "constexprs" in inspect.signature(ASTSource).parameters
         else "constants"
     )
-    return ASTSource(kernel, signature=signature, **{keyword: constants})
+    return ASTSource(
+        case.kernel,
+        signature=case.signature,
+        **{keyword: case.constants},
+    )
 
 
-def compile_ttadapter(arch: str, case: str = "add") -> str:
+def compile_ttadapter(arch: str, case_name: str = "add") -> str:
     """Run Triton's in-process stages and stop before the external NPU compiler."""
     from triton._C.libtriton import ir
 
     target = GPUTarget("npu", arch, 0)
     backend = make_backend(target)
     options = backend.parse_options({"arch": arch})
-    source = make_source(case)
+    source = make_source(case_name)
 
     stages = {}
     if "language" in inspect.signature(backend.add_stages).parameters:
@@ -154,7 +109,7 @@ def compile_ttadapter(arch: str, case: str = "add") -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compile a built-in Triton DSL test case to TTAdapter IR."
+        description="Compile a modular Triton DSL test case to TTAdapter IR."
     )
     parser.add_argument(
         "output",
@@ -170,17 +125,24 @@ def main() -> int:
     )
     parser.add_argument(
         "--case",
-        choices=CASES,
+        choices=case_names(),
         default="add",
         help="DSL test case to compile (default: add)",
     )
     parser.add_argument(
         "--print-ir", action="store_true", help="also print the generated IR"
     )
+    parser.add_argument(
+        "--metadata", type=pathlib.Path, help="also write runtime metadata as JSON"
+    )
     args = parser.parse_args()
 
     ttadapter = compile_ttadapter(args.arch, args.case)
     args.output.write_text(ttadapter, encoding="utf-8")
+    if args.metadata:
+        args.metadata.write_text(
+            json.dumps(load_case(args.case).metadata()), encoding="utf-8"
+        )
     print(f"TTAdapter IR written to {args.output.resolve()}")
     if args.print_ir:
         print(ttadapter)

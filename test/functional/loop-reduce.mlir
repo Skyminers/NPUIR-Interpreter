@@ -37,9 +37,9 @@ module {
       hivm.hir.set_flag[<PIPE_MTE2>, <PIPE_V>, <EVENT_ID0>]
       hivm.hir.wait_flag[<PIPE_MTE2>, <PIPE_V>, <EVENT_ID0>]
 
-      // vreduce accumulates into its destination, so this folds the whole
-      // tile into the running total.
-      hivm.hir.vreduce <sum>
+      // already_initialize_init makes vreduce accumulate into the destination,
+      // so this folds the whole tile into the running total.
+      hivm.hir.vreduce {already_initialize_init} <sum>
           ins(%tile : memref<16xf32, #hivm.address_space<ub>>)
           outs(%acc : memref<1xf32, #hivm.address_space<ub>>)
           unsigned_src = false reduce_dims = [0]

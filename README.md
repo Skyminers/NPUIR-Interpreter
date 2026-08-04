@@ -77,8 +77,15 @@ TRITON_PYTHON=/path/to/triton-ascend/.venv/bin/python \
   python3 test/run_dsl_e2e.py
 ```
 
-该命令依次验证 `add`、`affine_abs`、`select` 和 `cast` 的 DSL → TTAdapter
-→ GraphSyncSolver HIVM → Interpreter 链路；可用 `--case select` 单独运行一个用例。
+该命令依次验证基础逐元素算子以及真实的行级 `softmax`、`layer_norm` 和
+`flash_attention`、`swa`、`linear_attention` 的 DSL → TTAdapter →
+GraphSyncSolver HIVM → Interpreter 链路；
+可用 `--case flash_attention` 单独运行一个用例。每个用例都会比较
+lazy/inorder 调度的输出，并执行一次 fuzz 调度。
+
+用例位于 `test/dsl_e2e/cases/`，每个 Python 文件完整定义一个 Triton kernel、
+编译签名、解释器参数、关键 HIVM op 和数值参考。新增同目录文件后，
+`dump_ttadapter.py` 与 `run_dsl_e2e.py` 会自动发现，无需维护集中式用例表。
 
 ## 快速使用
 
