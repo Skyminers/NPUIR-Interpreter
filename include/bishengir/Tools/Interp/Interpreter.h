@@ -7,9 +7,10 @@
 //===----------------------------------------------------------------------===//
 //
 // Green-thread scheduler, per-core execution state and the op-handler
-// registry. Cores are cooperative: a core runs until it blocks on a flag,
-// barrier or lock, at which point the scheduler picks the next runnable core
-// in CoreId order (or, in fuzz mode, a seeded random one).
+// registry. Deterministic schedules execute one operation on each runnable
+// core in CoreId order before rotating. Fuzz mode instead uses seeded random
+// core selection and time slices. A flag, barrier or lock parks only the core
+// that is waiting.
 //
 //===----------------------------------------------------------------------===//
 
@@ -47,8 +48,10 @@ namespace interp {
 enum class SchedMode {
   /// Effects commit the moment they are issued. Fastest, and the reference
   /// answer for differential testing - but blind to missing synchronisation.
+  /// Runnable cores are interleaved one operation at a time.
   InOrder,
-  /// Effects commit as late as the flush rules allow. The default.
+  /// Effects commit as late as the flush rules allow. Runnable cores are
+  /// interleaved one operation at a time. The default.
   Lazy,
   /// Like Lazy, but core interleaving and commit timing are randomised from
   /// a fixed seed.
@@ -96,6 +99,10 @@ struct InterpOptions {
   bool exactLayout = false;
   bool verbose = false;
   std::string traceFile;
+  /// Write a replayable JSON Lines debug session. Empty disables recording.
+  std::string debugFile;
+  /// Record detailed step events only when this core executes. Empty means all.
+  std::string debugCore;
   uint64_t maxSteps = 200ull * 1000 * 1000;
 };
 
@@ -107,9 +114,10 @@ enum class CoreKind : uint8_t { AIC = 0, AIV = 1 };
 
 llvm::StringRef getCoreKindName(CoreKind kind);
 
-/// Cores are always addressed by the full triple even when only one block is
-/// simulated, so that turning on multi-block later needs no data-structure
-/// change.
+/// One interpreter execution lane. `blockIdx` is the Triton program instance,
+/// not a physical AIC/AIV ordinal. The debugger presents one block's lanes as
+/// a single physical-core slice while the launch-level interpreter executes
+/// every block needed to produce the complete output tensor.
 struct CoreId {
   unsigned blockIdx = 0;
   CoreKind kind = CoreKind::AIV;
@@ -173,6 +181,7 @@ struct CallFrame {
 };
 
 class Interpreter;
+class DebugRecorder;
 
 struct CoreState {
   CoreId id;
@@ -364,8 +373,8 @@ public:
       return *arenas.front();
     return *arenas[id];
   }
-  /// Arena id for `space`. Core-local spaces are keyed by the block that owns
-  /// them: in a MIX kernel the AIC and its AIVs share one UB pool.
+  /// Arena id for `space`. L1/L0 are shared by one MIX block; each split AIV
+  /// lane has a private UB at the same local addresses.
   int getArenaId(AddrSpace space, const CoreId &id);
 
   /// Allocate storage for `type` and return a view over it.
@@ -489,6 +498,8 @@ public:
                    const MemRefValue &dst);
 
 private:
+  friend class DebugRecorder;
+
   /// Discover the AIC/AIV entry points and build one CoreState per core.
   mlir::LogicalResult setupCores();
   mlir::LogicalResult bindArguments(CoreState &core, mlir::func::FuncOp func);
@@ -561,12 +572,15 @@ private:
   bool aborted = false;
   mlir::Operation *lastSyncOp = nullptr;
   uint64_t totalSteps = 0;
-  unsigned currentCoreIdx = 0;
+  /// First core considered by the next deterministic scheduler turn.
+  unsigned nextCoreIdx = 0;
   uint64_t progressCounter = 0;
   uint64_t lastRetryProgress = ~0ull;
 
   std::mt19937_64 rng;
   std::unique_ptr<llvm::raw_ostream> traceStream;
+  std::unique_ptr<DebugRecorder> debugRecorder;
+  mlir::Operation *lastExecutedOp = nullptr;
 };
 
 //===----------------------------------------------------------------------===//

@@ -9,6 +9,7 @@ NPUIR Interpreter 是面向 **memref-form NPUIR（HIVM）** 的 CPU 解释器。
 - 通过 `inorder`、`lazy` 和 `fuzz` 三种调度模式执行 NPUIR；
 - 模拟 S、V、M、MTE 等流水线的延迟提交与同步；
 - 检测缺失同步、跨核数据竞争、死锁、越界访问和 layout 不一致；
+- 通过独立 debug 二进制记录每步 pipe、同步和内存状态，并可视化回放；
 - 使用 APInt/APFloat 覆盖 f16、bf16、f8 等低精度数值路径；
 - 读取和输出 `.npy`，便于与 NumPy、PyTorch golden 结果比较。
 
@@ -59,7 +60,7 @@ git submodule update --init --recursive
 ```
 
 默认目标会构建工具，并运行 lit 回归、gtest 单元测试和四组精度扫描。产物位于
-`build/bin/npuir-interp`。
+`build/bin/npuir-interp`；调试版本位于 `build/bin/npuir-interp-debug`。
 
 日常开发可以按需运行单个目标：
 
@@ -70,11 +71,18 @@ cmake --build build --target check-npuir-interpreter-unit
 cmake --build build --target check-npuir-interpreter-precision
 ```
 
-DSL 到解释器的端到端用例需要一个已安装 Triton Ascend 的 Python 环境：
+DSL E2E 需要在 Linux Python 3.12 venv 中安装 Triton Ascend 官方发行包：
 
 ```bash
-TRITON_PYTHON=/path/to/triton-ascend/.venv/bin/python \
-  python3 test/run_dsl_e2e.py
+test/dsl_e2e/setup_venv.sh
+source .venv/bin/activate
+```
+
+官方包目前没有 macOS wheel；完整的平台选择、离线下载和排障说明见
+[DSL E2E 环境文档](test/dsl_e2e/README.md)。安装后运行全部用例：
+
+```bash
+python test/run_dsl_e2e.py --triton-python "$VIRTUAL_ENV/bin/python"
 ```
 
 该命令依次验证基础逐元素算子以及真实的行级 `softmax`、`layer_norm` 和
@@ -87,6 +95,16 @@ lazy/inorder 调度的输出，并执行一次 fuzz 调度。
 编译签名、解释器参数、关键 HIVM op 和数值参考。新增同目录文件后，
 `dump_ttadapter.py` 与 `run_dsl_e2e.py` 会自动发现，无需维护集中式用例表。
 
+单个用例可以直接生成可视化调试会话。例如：
+
+```bash
+python test/dsl_e2e/cases/flash_attention.py --debug --serve
+```
+
+命令会同时完成 lazy/inorder 输出比较、数学参考值校验和 fuzz 调度，然后自动打开
+调试页面。产物保存在 `build/debug/flash_attention/`；详细参数见
+[可视化调试器文档](docs/Debugger_zh.md)。
+
 ## 快速使用
 
 ```bash
@@ -95,6 +113,18 @@ build/bin/npuir-interp kernel.mlir \
   --args=a.npy,b.npy,zeros \
   --out=out.
 ```
+
+生成并可视化回放调试会话：
+
+```bash
+build/bin/npuir-interp-debug kernel.mlir \
+  --sched=lazy --args=a.npy,b.npy,zeros \
+  --debug-output=npuir-debug.jsonl
+```
+
+随后用浏览器打开 [`tools/debug-ui/index.html`](tools/debug-ui/index.html) 并加载该
+JSONL 文件。调试器可逐步观察每条 pipe 的任务、core 阻塞、flag/barrier 以及任意
+arena 地址的实际字节值。详细说明见[可视化调试器文档](docs/Debugger_zh.md)。
 
 完整参数、调度模式和诊断示例见[中文使用指南](docs/Usage_zh.md)。实现原理见
 [中文架构文档](docs/Architecture_zh.md)或[English architecture](docs/Architecture.md)；

@@ -152,6 +152,7 @@ public:
   unsigned getOwnerCore() const { return ownerCore; }
   uint64_t getCapacity() const { return capacity; }
   uint64_t getHighWaterMark() const { return bumpTop; }
+  const std::vector<AllocRecord> &getAllocations() const { return allocs; }
 
   /// Bump-allocate `size` bytes with `align` alignment. Returns the byte
   /// offset, or std::nullopt when the arena would overflow.

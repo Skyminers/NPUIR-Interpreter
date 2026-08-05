@@ -1357,15 +1357,15 @@ void registerCommunityOps(OpRegistry &registry) {
       llvm::raw_string_ostream os(text);
       attr.print(os);
       StringRef s = os.str();
-      if (s.contains("floor"))
+      if (s.contains("<floor>"))
         mode = InterpRoundMode::FLOOR;
-      else if (s.contains("ceil"))
+      else if (s.contains("<ceil>"))
         mode = InterpRoundMode::CEIL;
-      else if (s.contains("odd"))
+      else if (s.contains("<odd>"))
         mode = InterpRoundMode::ODD;
-      else if (s.contains("round"))
+      else if (s.contains("<round>"))
         mode = InterpRoundMode::ROUND;
-      else if (s.contains("trunc"))
+      else if (s.contains("<trunc>"))
         mode = InterpRoundMode::TRUNC;
     }
     return execCast(interp, core, op, /*isUnsigned=*/false, mode);

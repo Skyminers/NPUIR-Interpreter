@@ -27,12 +27,6 @@ llvm::StringRef getPipeName(Pipe pipe) {
     return "PIPE_MTE2";
   case Pipe::MTE3:
     return "PIPE_MTE3";
-  case Pipe::MTE4:
-    return "PIPE_MTE4";
-  case Pipe::MTE5:
-    return "PIPE_MTE5";
-  case Pipe::V2:
-    return "PIPE_V2";
   case Pipe::FIX:
     return "PIPE_FIX";
   case Pipe::NumPipes:

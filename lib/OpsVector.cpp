@@ -302,7 +302,14 @@ ExecResult execMultiReduction(Interpreter &interp, CoreState &core,
       resultShape.push_back(srcShape[d]);
 
   std::vector<RuntimeValue> result;
-  if (acc.isVector()) {
+  // Vectorization marks reductions whose accumulator is merely an output
+  // buffer placeholder with `withoutInitMergeOp`.  Those reductions start
+  // from their first source lane; reading the placeholder would fold UB
+  // poison into otherwise valid max/sum results.
+  if (op->hasAttr("withoutInitMergeOp")) {
+    result.resize(static_cast<size_t>(std::max<int64_t>(
+        getVectorElementCount(resultShape), 0)));
+  } else if (acc.isVector()) {
     result = acc.getVectorElements();
   } else {
     result.assign(
@@ -423,6 +430,29 @@ ExecResult execSplat(Interpreter &interp, CoreState &core, Operation *op) {
   return ExecResult::Advance;
 }
 
+ExecResult execConstantMask(Interpreter &interp, CoreState &core,
+                            Operation *op) {
+  auto maskOp = cast<vector::ConstantMaskOp>(op);
+  VectorType type = maskOp.getResult().getType();
+  SmallVector<int64_t, 4> shape(type.getShape().begin(),
+                                type.getShape().end());
+  SmallVector<int64_t, 4> active;
+  for (Attribute attr : maskOp.getMaskDimSizes())
+    active.push_back(cast<IntegerAttr>(attr).getInt());
+
+  std::vector<RuntimeValue> elements;
+  elements.reserve(static_cast<size_t>(getVectorElementCount(shape)));
+  forEachIndex(shape, [&](ArrayRef<int64_t> index) {
+    bool enabled = true;
+    for (size_t d = 0; d < index.size(); ++d)
+      enabled &= index[d] < active[d];
+    elements.push_back(RuntimeValue::getInt(llvm::APInt(1, enabled)));
+  });
+  interp.setValue(core, maskOp.getResult(),
+                  RuntimeValue::getVector(shape, std::move(elements)));
+  return ExecResult::Advance;
+}
+
 ExecResult execExtract(Interpreter &interp, CoreState &core, Operation *op) {
   auto extractOp = cast<vector::ExtractOp>(op);
   RuntimeValue source = interp.getValue(core, extractOp.getVector());
@@ -473,6 +503,7 @@ void registerVectorOps(OpRegistry &registry) {
   registry.add("vector.transfer_write", execTransferWrite);
   registry.add("vector.broadcast", execBroadcast);
   registry.add("vector.splat", execSplat);
+  registry.add("vector.constant_mask", execConstantMask);
   registry.add("vector.shape_cast", execShapeCast);
   registry.add("vector.multi_reduction", execMultiReduction);
   registry.add("vector.extract", execExtract);

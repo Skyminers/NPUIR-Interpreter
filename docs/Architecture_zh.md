@@ -56,9 +56,9 @@ npuir-interp kernel.mlir --sched=lazy --args=a.npy,b.npy,zeros --out=out.
 
 | `--sched=` | 行为 | 用途 |
 |---|---|---|
-| `inorder` | effect 立即提交 | 纯数值 golden，最快。**按构造原理，发现不了任何同步问题** |
-| `lazy`（默认） | effect 尽可能晚提交 | 检查模式 |
-| `fuzz --seed=N` | lazy + 随机化核间交错 | 找脆弱的同步 |
+| `inorder` | effect 立即提交；每执行一条 op 后轮换可运行核 | 确定性的纯数值 golden。**按构造原理，发现不了任何同步问题** |
+| `lazy`（默认） | effect 尽可能晚提交；每执行一条 op 后轮换可运行核 | 确定性地模拟多核并行推进的检查模式 |
+| `fuzz --seed=N` | lazy + 随机选核 + 1～8 条 op 的随机时间片 | 找脆弱的同步 |
 
 **对 pass 后 IR，差分测试是最强的自动判据**：同一份 IR 分别用 `inorder` 和
 `lazy` 跑，输出一致说明已经物化的同步是充分的，不一致说明有同步缺失。多个用例的
@@ -409,8 +409,10 @@ bf16 -> i32       rint round floor ceil trunc     i8   -> bf16  rint
 - `RegionFrame`：区域激活，持有 block 和指令指针，外加 `scf.for` / `scf.while`
   的循环状态。
 
-一个核一直跑到阻塞、结束、或（fuzz 模式下）随机时间片用完，然后调度器按 `CoreId`
-字典序选下一个可运行的核。阻塞时**不推进指令指针**，下次调度重新执行同一条 op。
+`inorder` 和 `lazy` 使用逐指令轮询：每个可运行核执行一条 op 后，调度器就按 `CoreId`
+字典序选择下一个核；已阻塞或结束的核会被跳过。这样不依赖宿主线程也能稳定模拟多个
+核的并行推进，并且调试会话可以完全复现。`fuzz` 则随机选核，并给它 1～8 条 op 的
+随机时间片。阻塞时**不推进指令指针**，下次调度重新执行同一条 op。
 
 ---
 

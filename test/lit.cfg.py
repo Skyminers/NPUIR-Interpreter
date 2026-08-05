@@ -21,7 +21,8 @@ llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 llvm_config.with_environment("PATH", config.npuir_interpreter_tools_dir,
                              append_path=True)
 llvm_config.add_tool_substitutions(
-    ["npuir-interp", "bishengir-compile", "FileCheck", "count", "not"],
+    ["npuir-interp", "npuir-interp-debug", "bishengir-compile", "FileCheck",
+     "count", "not"],
     [config.npuir_interpreter_tools_dir, config.llvm_tools_dir])
 
 config.environment["FILECHECK_OPTS"] = (

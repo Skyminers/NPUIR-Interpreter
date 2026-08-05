@@ -9,10 +9,8 @@
 // RUN: not npuir-interp %s --sched=lazy --args=arange,zeros,zeros 2>&1 | FileCheck %s
 
 // CHECK: DATA RACE on gm
-// CHECK:   W  AIC#0
-// CHECK-SAME: hivm.hir.store
-// CHECK:   R  AIV#0
-// CHECK-SAME: hivm.hir.load
+// CHECK-DAG:   W  AIC#0{{.*}}hivm.hir.store
+// CHECK-DAG:   R  AIV#0{{.*}}hivm.hir.load
 // CHECK: no happens-before edge between these two accesses
 
 module attributes {hivm.module_core_type = #hivm.module_core_type<MIX>} {

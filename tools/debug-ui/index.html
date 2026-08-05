@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NPUIR 计算模拟可视化</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">NPUIR INTERPRETER</p>
+      <h1>计算模拟可视化</h1>
+    </div>
+    <label class="load-button">
+      加载日志
+      <input id="session-file" type="file" accept=".jsonl,.json">
+    </label>
+  </header>
+
+  <main>
+    <section id="empty-state" class="empty-state">
+      <div class="empty-mark">⌁</div>
+      <h2>加载 npuir-debug.jsonl 开始回放</h2>
+      <p>调试日志由 <code>npuir-interp-debug</code> 生成，本页面仅重放。</p>
+    </section>
+
+    <div id="debugger" hidden>
+      <section class="transport panel">
+        <div class="transport-buttons">
+          <button id="first" class="icon-button" title="回到开始" aria-label="回到开始">|◀</button>
+          <button id="previous" title="上一步"><span aria-hidden="true">←</span> 上一步</button>
+          <button id="play" class="primary" title="播放 / 暂停">播放</button>
+          <button id="next" title="下一步">下一步 <span aria-hidden="true">→</span></button>
+          <button id="last" class="icon-button" title="跳到结束" aria-label="跳到结束">▶|</button>
+        </div>
+        <input id="timeline" type="range" min="0" value="0">
+        <div class="step-readout">事件 <strong id="step-current">0</strong> / <span id="step-total">0</span></div>
+      </section>
+
+      <section class="summary-grid">
+        <article class="metric"><span>调度策略</span><strong id="schedule">—</strong></article>
+        <article class="metric"><span>Program 切片</span><strong id="program-instance">—</strong></article>
+        <article class="metric"><span>正在观察</span><strong id="selected-core">—</strong></article>
+        <article class="metric"><span>本步状态</span><strong id="step-result">—</strong></article>
+        <article class="metric"><span>加载状态</span><strong id="finish-result">运行中</strong></article>
+      </section>
+
+      <div class="debug-workbench">
+        <section class="panel code-panel">
+          <div class="section-heading execution-heading">
+            <div><p class="eyebrow">CURRENT TRANSITION</p><h2>本步执行</h2></div>
+            <div class="heading-actions">
+              <span id="executed-core" class="pill accent">执行于 —</span>
+              <span id="event-sequence" class="pill">seq 0</span>
+            </div>
+          </div>
+          <div id="executed-op" class="op-card muted">初始状态</div>
+
+          <div class="ir-grid">
+            <section class="ir-pane" aria-label="AIC IR 执行位置">
+              <div class="source-heading">
+                <div><p class="eyebrow">CUBE CORE</p><h2>AIC IR</h2></div>
+                <button id="follow-aic-ir" class="quiet-button" type="button">定位 AIC</button>
+              </div>
+              <div id="aic-ir-source" class="ir-source"></div>
+            </section>
+            <section class="ir-pane" aria-label="AIV IR 执行位置">
+              <div class="source-heading">
+                <div><p class="eyebrow">VECTOR CORE</p><h2>AIV IR</h2></div>
+                <button id="follow-aiv-ir" class="quiet-button" type="button">定位 AIV</button>
+              </div>
+              <div id="aiv-ir-source" class="ir-source"></div>
+            </section>
+          </div>
+        </section>
+
+        <aside class="inspector-column" aria-label="核内状态检查器">
+          <section class="panel inspector-panel">
+            <div class="section-heading compact-heading">
+              <div><p class="eyebrow">CORE VIEW</p><h2>核内执行单元</h2></div>
+            </div>
+            <div id="cores" class="cores"></div>
+          </section>
+
+          <section class="panel inspector-panel">
+            <div class="section-heading compact-heading">
+              <div><p class="eyebrow">PIPE QUEUES</p><h2>Pipe 任务</h2></div>
+              <span id="pipe-core" class="pill">—</span>
+            </div>
+            <div id="pipes" class="pipes"></div>
+          </section>
+
+          <section class="panel inspector-panel sync-panel">
+            <div class="section-heading compact-heading">
+              <div><p class="eyebrow">SYNCHRONIZATION</p><h2>同步状态</h2></div>
+            </div>
+            <h3 class="subsection-title">正在等待</h3>
+            <div id="waits" class="stack-list"></div>
+            <h3 class="subsection-title">Flag 与 Barrier</h3>
+            <div id="sync" class="stack-list"></div>
+          </section>
+        </aside>
+      </div>
+
+      <details class="panel memory-panel">
+        <summary>
+          <span><span class="eyebrow">ADDRESS SPACE</span><strong>内存布局</strong></span>
+          <span class="memory-summary">16 进制表示的内存元素</span>
+        </summary>
+        <div class="memory-body">
+          <div class="memory-controls">
+            <select id="arena"></select>
+            <label>地址 <input id="memory-offset" value="0x0"></label>
+            <label>字节 <input id="memory-length" type="number" min="16" max="1024" step="16" value="256"></label>
+          </div>
+          <div id="allocations" class="allocations"></div>
+          <div id="typed-values" class="typed-values"></div>
+          <div class="memory-legend"><span class="changed-swatch"></span>本步发生变化的字节</div>
+          <div id="memory" class="hex-view"></div>
+        </div>
+      </details>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

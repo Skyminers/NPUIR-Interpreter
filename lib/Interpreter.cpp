@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Tools/Interp/Interpreter.h"
+#include "Debug.h"
 #include "NpyIO.h"
 
 #include "bishengir/Dialect/HACC/IR/HACC.h"
@@ -79,19 +80,13 @@ bool convertPipe(int32_t hivmPipe, Pipe &out) {
   case 5:
     out = Pipe::MTE3;
     return true;
-  case 7:
-    out = Pipe::MTE4;
-    return true;
-  case 8:
-    out = Pipe::MTE5;
-    return true;
-  case 9:
-    out = Pipe::V2;
-    return true;
   case 10:
     out = Pipe::FIX;
     return true;
-  // 6 = PIPE_ALL, 11/12 = virtual MTE2 pipes, 13 = PIPE_NUM, 99 = unassigned.
+  // 6 = PIPE_ALL, 7/8 = non-hardware MTE4/MTE5 compatibility values,
+  // 9 = PIPE_V2, 11/12 = virtual MTE2 pipes, 13 = PIPE_NUM,
+  // 99 = unassigned. None is an independently executable pipe on the target
+  // modelled by the interpreter.
   default:
     return false;
   }
@@ -163,24 +158,29 @@ Interpreter::Interpreter(ModuleOp module, InterpOptions options)
       rng(this->options.seed) {
   registerAllInterpOps(registry);
 
-  auto makeArena = [&](AddrSpace space, unsigned owner, uint64_t capacity) {
+  auto makeArena = [&](AddrSpace space, unsigned keyOwner,
+                       unsigned displayOwner, uint64_t capacity) {
     int id = static_cast<int>(arenas.size());
-    arenas.push_back(std::make_unique<Arena>(space, owner, capacity,
+    arenas.push_back(std::make_unique<Arena>(space, displayOwner, capacity,
                                              this->options.poison));
-    arenaIndex[{static_cast<unsigned>(space), owner}] = id;
+    arenaIndex[{static_cast<unsigned>(space), keyOwner}] = id;
   };
 
-  makeArena(AddrSpace::GM, 0, this->options.gmSize);
-  makeArena(AddrSpace::SSBUF, 0, this->options.ssbufSize);
-  makeArena(AddrSpace::Host, 0, this->options.hostSize);
-  // On-chip pools belong to a block, not to an individual core: in a MIX
-  // kernel the AIC's fixpipe writes into the same UB its AIVs read.
+  makeArena(AddrSpace::GM, 0, 0, this->options.gmSize);
+  makeArena(AddrSpace::SSBUF, 0, 0, this->options.ssbufSize);
+  makeArena(AddrSpace::Host, 0, 0, this->options.hostSize);
+  // L1/L0 belong to the cube-vector group.  Each split vector lane has its
+  // own UB address space, however: dual-destination fixpipe routes one half
+  // of a cube result to the same local UB address in each AIV lane.
   for (unsigned block = 0; block < this->options.blockDim; ++block) {
-    makeArena(AddrSpace::UB, block, this->options.ubSize);
-    makeArena(AddrSpace::L1, block, this->options.l1SizeBytes);
-    makeArena(AddrSpace::L0A, block, this->options.l0aSize);
-    makeArena(AddrSpace::L0B, block, this->options.l0bSize);
-    makeArena(AddrSpace::L0C, block, this->options.l0cSize);
+    for (unsigned sub = 0; sub < this->options.subBlockNum; ++sub) {
+      unsigned keyOwner = block * this->options.subBlockNum + sub;
+      makeArena(AddrSpace::UB, keyOwner, block, this->options.ubSize);
+    }
+    makeArena(AddrSpace::L1, block, block, this->options.l1SizeBytes);
+    makeArena(AddrSpace::L0A, block, block, this->options.l0aSize);
+    makeArena(AddrSpace::L0B, block, block, this->options.l0bSize);
+    makeArena(AddrSpace::L0C, block, block, this->options.l0cSize);
   }
 
   if (!this->options.traceFile.empty()) {
@@ -193,6 +193,12 @@ Interpreter::Interpreter(ModuleOp module, InterpOptions options)
     else
       traceStream = std::move(stream);
   }
+  if (!this->options.debugFile.empty()) {
+    auto recorder =
+        std::make_unique<DebugRecorder>(*this, this->options.debugFile);
+    if (recorder->isOpen())
+      debugRecorder = std::move(recorder);
+  }
 }
 
 Interpreter::~Interpreter() = default;
@@ -200,7 +206,13 @@ Interpreter::~Interpreter() = default;
 llvm::raw_ostream &Interpreter::report() { return llvm::errs(); }
 
 int Interpreter::getArenaId(AddrSpace space, const CoreId &id) {
-  unsigned owner = isCoreLocal(space) ? id.blockIdx : 0;
+  unsigned owner = 0;
+  if (space == AddrSpace::UB) {
+    unsigned sub = id.kind == CoreKind::AIV ? id.subBlockIdx : 0;
+    owner = id.blockIdx * options.subBlockNum + sub;
+  } else if (isCoreLocal(space)) {
+    owner = id.blockIdx;
+  }
   auto it = arenaIndex.find({static_cast<unsigned>(space), owner});
   if (it == arenaIndex.end()) {
     // Every space is created for every block up front, so this cannot happen
@@ -261,6 +273,10 @@ bool Interpreter::allocateMemRef(CoreState &core, MemRefType type,
       uint64_t bytes =
           static_cast<uint64_t>(out.getNumElements()) * out.elemBytes;
       arenas[out.arena]->poison(out.byteOffset, bytes, out.elemType);
+      if (debugRecorder) {
+        ByteRange range{out.arena, out.byteOffset, out.byteOffset + bytes};
+        debugRecorder->memoryWritten(ArrayRef<ByteRange>(range));
+      }
       arenas[out.arena]->getShadow().invalidate(out.byteOffset,
                                                 out.byteOffset + bytes);
       return true;
@@ -611,6 +627,8 @@ void Interpreter::commitEffect(CoreState &core, Effect &effect) {
   }
   if (effect.commit)
     effect.commit();
+  if (debugRecorder && !effect.writes.empty())
+    debugRecorder->memoryWritten(effect.writes);
 }
 
 void Interpreter::flushPipe(CoreState &core, Pipe pipe) {
@@ -1202,6 +1220,9 @@ ExecResult Interpreter::step(CoreState &core) {
   }
 
   Operation *op = &*region.ip;
+  lastExecutedOp = op;
+  if (debugRecorder)
+    debugRecorder->recordBeforeStep(core, op);
   trace(core, op);
   ++core.stepCount;
 
@@ -1243,9 +1264,10 @@ CoreState *Interpreter::pickCore() {
     return &cores[pick];
   }
 
-  // Round-robin starting after the core that ran last, in CoreId order.
+  // Deterministic one-operation round-robin in CoreId order. Blocked and
+  // finished cores are skipped without losing the cursor's position.
   for (unsigned n = 0; n < cores.size(); ++n) {
-    unsigned idx = (currentCoreIdx + n) % cores.size();
+    unsigned idx = (nextCoreIdx + n) % cores.size();
     if (cores[idx].status == CoreStatus::Runnable)
       return &cores[idx];
   }
@@ -1376,8 +1398,23 @@ void Interpreter::reportLeaks() {
 }
 
 LogicalResult Interpreter::run() {
-  if (failed(setupCores()))
+  if (failed(setupCores())) {
+    if (debugRecorder) {
+      debugRecorder->recordInitial();
+      debugRecorder->recordFinish(false);
+    }
     return failure();
+  }
+  if (debugRecorder)
+    debugRecorder->recordInitial();
+
+  auto finish = [&](bool succeeded) -> LogicalResult {
+    if (debugRecorder) {
+      debugRecorder->recordFinal();
+      debugRecorder->recordFinish(succeeded);
+    }
+    return succeeded ? success() : failure();
+  };
 
   report() << "npuir-interp: " << cores.size() << " core(s), sched=";
   switch (options.sched) {
@@ -1421,13 +1458,15 @@ LogicalResult Interpreter::run() {
 
       // No progress since the last retry: this is genuinely stuck.
       detectDeadlock();
-      return failure();
+      return finish(false);
     }
-    currentCoreIdx = core->index;
+    // Advance the deterministic cursor before executing so a core that blocks
+    // or finishes cannot monopolise the following scheduler turn.
+    nextCoreIdx = (core->index + 1) % cores.size();
 
-    // Run this core until it blocks, finishes, or (in fuzz mode) its randomly
-    // chosen slice expires.
-    uint64_t slice = options.sched == SchedMode::Fuzz ? (rng() % 8) + 1 : ~0ull;
+    // Deterministic modes model simultaneous progress with a reproducible
+    // one-op quantum. Fuzz mode varies both core choice and quantum length.
+    uint64_t slice = options.sched == SchedMode::Fuzz ? (rng() % 8) + 1 : 1;
     for (uint64_t n = 0; n < slice; ++n) {
       if (core->status != CoreStatus::Runnable)
         break;
@@ -1435,20 +1474,20 @@ LogicalResult Interpreter::run() {
         report() << "error: step limit (" << options.maxSteps
                  << ") exceeded; use --max-steps to raise it\n";
         aborted = true;
-        return failure();
+        return finish(false);
       }
       ExecResult result = step(*core);
       if (result == ExecResult::Error) {
         core->status = CoreStatus::Failed;
         aborted = true;
-        break;
-      }
-      if (result == ExecResult::Block)
-        break;
-      if (result == ExecResult::Advance) {
+      } else if (result == ExecResult::Advance) {
         if (!core->callStack.empty())
           advanceIp(*core);
       }
+      if (debugRecorder)
+        debugRecorder->recordStep(*core, lastExecutedOp, result);
+      if (result == ExecResult::Error || result == ExecResult::Block)
+        break;
     }
 
     if (aborted)
@@ -1456,14 +1495,14 @@ LogicalResult Interpreter::run() {
   }
 
   if (aborted)
-    return failure();
+    return finish(false);
 
   bool deadlocked = false;
   for (CoreState &core : cores)
     if (core.isBlocked())
       deadlocked = true;
   if (deadlocked)
-    return failure();
+    return finish(false);
 
   reportLeaks();
 
@@ -1473,12 +1512,12 @@ LogicalResult Interpreter::run() {
   if (raceCount)
     report() << raceCount << " data race(s) detected\n";
   if (errorCount)
-    return failure();
+    return finish(false);
   if (raceCount && options.checkRace)
-    return failure();
+    return finish(false);
   if (missingSyncCount && options.checkSync)
-    return failure();
-  return success();
+    return finish(false);
+  return finish(true);
 }
 
 //===----------------------------------------------------------------------===//

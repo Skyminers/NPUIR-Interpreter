@@ -1,7 +1,10 @@
 import triton
 import triton.language as tl
 
-from ..common import E2ECase, case_main
+if __package__:
+    from ..common import E2ECase, case_main
+else:
+    from _direct import E2ECase, case_main
 
 
 @triton.jit

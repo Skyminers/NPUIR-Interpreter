@@ -1,4 +1,5 @@
 add_library(NPUIRInterpreter STATIC
+  Debug.cpp
   DialectCompat.cpp
   Interpreter.cpp
   Memory.cpp

@@ -47,9 +47,9 @@ the hardware would drain it. A missing flag then shows up three ways:
 
 | `--sched=` | Behaviour | Use |
 |---|---|---|
-| `inorder` | Every effect commits immediately | Fast numerical golden. Finds no synchronisation bugs *by construction*. |
-| `lazy` (default) | Effects commit as late as the flush rules allow | The checking mode. |
-| `fuzz --seed=N` | Lazy plus randomised core interleaving | Shaking out fragile synchronisation. |
+| `inorder` | Every effect commits immediately; runnable cores rotate after each operation | Deterministic numerical golden. Finds no synchronisation bugs *by construction*. |
+| `lazy` (default) | Effects commit as late as the flush rules allow; runnable cores rotate after each operation | Deterministic checking mode with concurrent core progress. |
+| `fuzz --seed=N` | Lazy plus randomised core selection and 1-8 operation time slices | Shaking out fragile synchronisation. |
 
 **For post-sync IR, differential testing is the strongest automatic signal:**
 run the same IR under `inorder` and `lazy` and compare the outputs. Identical

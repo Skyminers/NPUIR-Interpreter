@@ -39,16 +39,35 @@ def main() -> int:
         ]
         result = subprocess.run(command, capture_output=True, text=True)
         dumps = sorted(tree_dir.rglob("*hivm-graph-sync-solver.mlir"))
+        # MIX kernels run the nested pass once for the AIC entry, once for the
+        # AIV entry, and once for the host workspace helper.  Module-scope
+        # dumps accumulate device synchronization as those entries complete;
+        # select the unique dump containing the most generated sync ops.
+        def sync_score(path: pathlib.Path) -> int:
+            text = path.read_text(encoding="utf-8")
+            return sum(
+                text.count(op)
+                for op in (
+                    "hivm.hir.set_flag",
+                    "hivm.hir.wait_flag",
+                    "hivm.hir.pipe_barrier",
+                )
+            )
+
+        best = max((sync_score(path) for path in dumps), default=-1)
+        selected = [path for path in dumps if sync_score(path) == best]
         # The downstream hivmc step may be unavailable on interpreter-only
-        # hosts. A unique pass dump proves that the stage we need completed.
-        if len(dumps) != 1:
+        # hosts. A unique maximal pass dump proves that the stage we need
+        # completed for every device entry.
+        if len(selected) != 1:
             sys.stderr.write(result.stdout)
             sys.stderr.write(result.stderr)
             sys.stderr.write(
-                f"expected one post-GraphSyncSolver dump, found {len(dumps)}\n"
+                "expected one maximal post-GraphSyncSolver dump, found "
+                f"{len(selected)} among {len(dumps)} dumps\n"
             )
             return result.returncode or 1
-        shutil.copyfile(dumps[0], args.output)
+        shutil.copyfile(selected[0], args.output)
     return 0
 
 

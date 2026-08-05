@@ -1,15 +1,13 @@
-// Negative test: the two sub-vector cores of one AIV share a UB, so an
-// unsynchronised write there is a real race. It is tempting to skip UB in a
-// race detector on the grounds that it is "core-private"; it is not, and this
-// is the case that proves the checker does not skip it.
+// The two split AIV lanes have distinct UB address spaces even though each
+// uses the same local address. Their UB writes therefore do not race. Both
+// lanes deliberately store to the same GM output, which remains a real race.
 //
-// Both sub-blocks address the same UB buffer through hivm.hir.pointer_cast at
-// a baked absolute address - the shape PlanMemory leaves once on-chip offsets
-// are fixed, and the only way two cores can name the same UB bytes.
+// This guards the distinction between lane-private UB and launch-global GM.
 
 // RUN: not npuir-interp %s --sched=lazy --sub-block-num=2 --args=zeros 2>&1 | FileCheck %s
 
-// CHECK: DATA RACE on ub
+// CHECK-NOT: DATA RACE on ub
+// CHECK: DATA RACE on gm
 // CHECK: AIV#0.0
 // CHECK: AIV#0.1
 // CHECK: no happens-before edge between these two accesses
@@ -22,8 +20,7 @@ module {
     %shared = hivm.hir.pointer_cast(%addr)
         : memref<8xi32, #hivm.address_space<ub>>
 
-    // Every sub-block writes its own index over the whole buffer. Nothing
-    // orders the two, and they share the pool.
+    // Every sub-block writes its own index to its private local UB.
     %sub64 = hivm.hir.get_sub_block_idx -> i64
     %sub = arith.trunci %sub64 : i64 to i32
     hivm.hir.vbrc ins(%sub : i32)

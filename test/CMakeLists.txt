@@ -8,7 +8,7 @@ configure_lit_site_cfg(
 add_lit_testsuite(check-npuir-interpreter
   "Running the NPUIR interpreter regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
-  DEPENDS npuir-interp bishengir-compile FileCheck count not
+  DEPENDS npuir-interp npuir-interp-debug bishengir-compile FileCheck count not
 )
 
 set_target_properties(check-npuir-interpreter PROPERTIES FOLDER "Tests")

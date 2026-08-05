@@ -354,6 +354,84 @@ ExecResult execFixpipe(Interpreter &interp, CoreState &core, Operation *op) {
   LayoutTag tag = fixpipeOp.getDmaMode() == hivm::FixpipeDMAMode::NZ2NZ
                       ? LayoutTag::NZ
                       : LayoutTag::ND;
+
+  auto dual = fixpipeOp.getDualDstMode();
+  if (dual && dual.getDualDstMode() == hivm::FixpipeDualDstMode::ROW_SPLIT) {
+    if (interp.getOptions().subBlockNum != 2) {
+      interp.emitError(op) << "ROW_SPLIT fixpipe requires --sub-block-num=2";
+      return ExecResult::Error;
+    }
+
+    MemRefValue src, dst;
+    if (!resolveCopyOperands(interp, core, op, fixpipeOp.getSrc(),
+                             fixpipeOp.getDst(), src, dst))
+      return ExecResult::Error;
+    if (dst.space != AddrSpace::UB) {
+      interp.emitError(op) << "ROW_SPLIT fixpipe destination must be UB";
+      return ExecResult::Error;
+    }
+
+    RuntimeValue dstRuntime = interp.getValue(core, fixpipeOp.getDst());
+    if (dstRuntime.isMemRef()) {
+      MemRefValue tagged = dstRuntime.getMemRefValue();
+      tagged.layout = tag;
+      interp.setValue(core, fixpipeOp.getDst(), RuntimeValue::getMemRef(tagged));
+      dst.layout = tag;
+    }
+
+    SmallVector<MemRefValue, 2> destinations;
+    SmallVector<ByteRange, 4> reads, writes;
+    interp.collectRanges(src, reads);
+    for (unsigned sub = 0; sub < 2; ++sub) {
+      MemRefValue laneDst = dst;
+      CoreId lane = core.id;
+      lane.kind = CoreKind::AIV;
+      lane.subBlockIdx = sub;
+      laneDst.arena = interp.getArenaId(AddrSpace::UB, lane);
+      destinations.push_back(laneDst);
+      interp.collectRanges(laneDst, writes);
+    }
+
+    int64_t srcCount = src.getNumElements();
+    int64_t laneCount = dst.getNumElements();
+    if (srcCount < 2 * laneCount) {
+      interp.emitError(op) << "ROW_SPLIT source has " << srcCount
+                           << " elements but two destinations require "
+                           << 2 * laneCount;
+      return ExecResult::Error;
+    }
+
+    Interpreter *interpPtr = &interp;
+    interp.issueEffect(
+        core, Pipe::FIX, op, reads, writes,
+        [interpPtr, op, src, destinations, laneCount]() {
+          auto logicalStorage = [](MemRefValue mem) {
+            if (mem.getRank() != 4)
+              return mem;
+            int64_t stride = 1;
+            for (int64_t d = mem.getRank() - 1; d >= 0; --d) {
+              mem.strides[d] = stride;
+              stride *= mem.sizes[d];
+            }
+            return mem;
+          };
+          MemRefValue logicalSrc = logicalStorage(src);
+          for (auto [sub, laneDst] : llvm::enumerate(destinations)) {
+            for (int64_t n = 0; n < laneCount; ++n) {
+              RuntimeValue value;
+              if (!rawLoad(*interpPtr, logicalSrc,
+                           static_cast<int64_t>(sub) * laneCount + n, op,
+                           value))
+                return;
+              value = convertForCopy(value, logicalSrc.elemType,
+                                     laneDst.elemType);
+              if (!rawStore(*interpPtr, laneDst, n, op, value))
+                return;
+            }
+          }
+        });
+    return ExecResult::Advance;
+  }
   return issueLayoutCopy(interp, core, op, Pipe::FIX, fixpipeOp.getSrc(),
                          fixpipeOp.getDst(), tag);
 }

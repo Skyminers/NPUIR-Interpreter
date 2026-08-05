@@ -45,6 +45,14 @@
 using namespace mlir;
 using namespace bishengir::interp;
 
+#ifndef NPUIR_INTERP_TOOL_NAME
+#define NPUIR_INTERP_TOOL_NAME "npuir-interp"
+#endif
+
+#ifndef NPUIR_INTERP_DEBUG_DEFAULT
+#define NPUIR_INTERP_DEBUG_DEFAULT ""
+#endif
+
 namespace {
 
 llvm::cl::opt<std::string> inputFilename(llvm::cl::Positional,
@@ -74,16 +82,16 @@ llvm::cl::opt<unsigned> blockDim("block-dim",
 
 llvm::cl::opt<unsigned>
     subBlockNum("sub-block-num",
-                llvm::cl::desc("Sub-vector cores per AIV (they share one UB)"),
+                llvm::cl::desc("Split AIV lanes per program (private UB per lane)"),
                 llvm::cl::init(1));
 
 llvm::cl::opt<SchedMode> schedMode(
     "sched", llvm::cl::desc("Scheduling / effect-commit model"),
     llvm::cl::values(
         clEnumValN(SchedMode::InOrder, "inorder",
-                   "Commit each effect immediately (fast, finds no races)"),
+                   "Immediate effects with deterministic core round-robin"),
         clEnumValN(SchedMode::Lazy, "lazy",
-                   "Commit effects as late as the flush rules allow"),
+                   "Lazy effects with deterministic core round-robin"),
         clEnumValN(SchedMode::Fuzz, "fuzz",
                    "Lazy plus randomised core interleaving")),
     llvm::cl::init(SchedMode::Lazy));
@@ -145,6 +153,17 @@ llvm::cl::opt<std::string>
               llvm::cl::desc("Write a per-op execution trace to this file"),
               llvm::cl::init(""));
 
+llvm::cl::opt<std::string> debugFile(
+    "debug-output",
+    llvm::cl::desc("Write a replayable JSONL debug session to this file"),
+    llvm::cl::init(NPUIR_INTERP_DEBUG_DEFAULT));
+
+llvm::cl::opt<std::string> debugCore(
+    "debug-core",
+    llvm::cl::desc("Record the single-program AIC/AIV slice containing this "
+                   "lane (for example, AIV#0.0)"),
+    llvm::cl::init(""));
+
 llvm::cl::opt<uint64_t>
     maxSteps("max-steps",
              llvm::cl::desc("Abort after this many interpreted ops"),
@@ -160,7 +179,7 @@ llvm::cl::opt<bool> useTargetSizes(
     llvm::cl::init(true));
 
 void printVersion(llvm::raw_ostream &os) {
-  os << "npuir-interp " << NPUIR_INTERPRETER_VERSION << '\n';
+  os << NPUIR_INTERP_TOOL_NAME << ' ' << NPUIR_INTERPRETER_VERSION << '\n';
 }
 
 /// Read the on-chip memory sizes the compiler was targeting, so the capacity
@@ -207,7 +226,8 @@ int main(int argc, char **argv) {
   llvm::cl::SetVersionPrinter(printVersion);
   llvm::cl::ParseCommandLineOptions(
       argc, argv,
-      "npuir-interp - CPU interpreter for memref-form NPUIR (HIVM)\n\n"
+      NPUIR_INTERP_TOOL_NAME
+      " - CPU interpreter for memref-form NPUIR (HIVM)\n\n"
       "Runs a compiled kernel on the host to check both its numerics and the "
       "synchronisation the compiler inserted. Deferred pipe effects mean a "
       "missing flag shows up as poison, a data race, or a deadlock rather "
@@ -273,6 +293,8 @@ int main(int argc, char **argv) {
   options.checkRawPointerRaces = checkRawPointerRaces;
   options.exactLayout = exactLayout;
   options.traceFile = traceFile;
+  options.debugFile = debugFile;
+  options.debugCore = debugCore;
   options.maxSteps = maxSteps;
   options.verbose = verbose;
 

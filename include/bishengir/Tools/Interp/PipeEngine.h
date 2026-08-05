@@ -42,9 +42,6 @@ enum class Pipe : uint8_t {
   MTE1,
   MTE2,
   MTE3,
-  MTE4,
-  MTE5,
-  V2,
   FIX,
   NumPipes
 };
