@@ -23,6 +23,7 @@ let playing = null;
 let memory = new Map();
 let replayedThrough = -1;
 let highlightedIrLines = {AIC: 0, AIV: 0};
+let lastExecutedIrLines = {AIC: [], AIV: []};
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -110,6 +111,14 @@ function activateSession(text) {
   selectedCoreId = initialCores.find((core) => core.kind === requestedKind)?.id ?? initialCores[0]?.id ?? null;
   memory = new Map(); replayedThrough = -1;
   highlightedIrLines = {AIC: 0, AIV: 0};
+  lastExecutedIrLines = {AIC: [], AIV: []};
+  const latestIrLine = {AIC: 0, AIV: 0};
+  states.forEach((state, index) => {
+    const kind = coreCoordinates(state.selected_core)?.kind;
+    if (kind && state.executed?.ir_line) latestIrLine[kind] = Number(state.executed.ir_line);
+    lastExecutedIrLines.AIC[index] = latestIrLine.AIC;
+    lastExecutedIrLines.AIV[index] = latestIrLine.AIV;
+  });
   const sourceHtml = String(meta.ir ?? "").split("\n").map((line, index) => `
     <div class="ir-line" data-line="${index + 1}"><span class="ir-line-number">${index + 1}</span><code>${escapeHtml(line) || " "}</code></div>`).join("");
   ui.aicIr.innerHTML = sourceHtml;
@@ -211,7 +220,10 @@ function statusLabel(status) {
 }
 
 function resultLabel(result) {
-  return ({ready: "就绪", advance: "已推进", done: "已完成", success: "成功", failed: "失败"})[result] ?? result;
+  return ({
+    ready: "就绪", advance: "已推进", handled: "已处理", block: "已阻塞",
+    complete: "已完成", done: "已完成", success: "成功", failed: "失败"
+  })[result] ?? result;
 }
 
 function taskKindLabel(kind) {
@@ -238,9 +250,10 @@ function renderIrPane(kind, state, force = false) {
   const source = kind === "AIC" ? ui.aicIr : ui.aivIr;
   const core = visibleCores(state).find((entry) => entry.kind === kind);
   const executedKind = coreCoordinates(state.selected_core)?.kind;
-  const line = Number(executedKind === kind && state.executed
-    ? state.executed.ir_line : core?.current?.ir_line ?? 0);
   const previousLine = highlightedIrLines[kind];
+  const line = Number(executedKind === kind && state.executed
+    ? state.executed.ir_line
+    : core?.current?.ir_line ?? lastExecutedIrLines[kind][step] ?? 0);
   if (line !== previousLine) {
     if (previousLine) source.querySelector(`[data-line="${previousLine}"]`)?.classList.remove("current");
     highlightedIrLines[kind] = line;
@@ -307,7 +320,7 @@ function renderSync(state) {
   const cores = visibleCores(state);
   const blocked = cores.filter((core) => core.status.startsWith("blocked"));
   ui.waits.innerHTML = blocked.length ? blocked.map((core) => `
-    <div class="list-item"><strong>${escapeHtml(coreLabel(core))}</strong> · ${escapeHtml(core.status)}
+    <div class="list-item"><strong>${escapeHtml(coreLabel(core))}</strong> · ${escapeHtml(statusLabel(core.status))}
       <small>${escapeHtml(core.blocked.what || "等待条件未满足")}</small>
       <small>${escapeHtml(core.blocked.operation?.location ?? "")}</small>
     </div>`).join("") : '<div class="empty-list">当前没有 core 等待同步。</div>';
@@ -439,5 +452,5 @@ function renderMemory(state) {
 }
 
 ui.arena.addEventListener("change", () => renderMemory(states[step]));
-ui.offset.addEventListener("change", () => renderMemory(states[step]));
-ui.length.addEventListener("change", () => renderMemory(states[step]));
+ui.offset.addEventListener("input", () => renderMemory(states[step]));
+ui.length.addEventListener("input", () => renderMemory(states[step]));

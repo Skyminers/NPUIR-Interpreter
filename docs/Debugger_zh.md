@@ -46,17 +46,17 @@ python3 -m http.server 8000
 
 - 上一步、下一步、首尾跳转、自动播放和时间线拖动；
 - 查看本步完整 operation 文本、执行前输入 SSA 值和执行后输出 SSA 值；
-- 在完整 HIVM IR 窗口中自动定位并高亮当前执行行；
+- 在 AIC/AIV 两个完整 HIVM IR 窗口中分别定位并高亮各自执行行；
 - 选择 core，观察每条 pipe 中任务的入队和退休；
 - 查看当前同步等待、intra-core flag、cross-core flag 和 barrier；
 - 选择 arena 和 allocation，按地址浏览字节；本步发生变化的字节会高亮；
 - 键盘左右方向键单步，空格播放或暂停。
 
 界面中的核拓扑固定为**一个物理核内的切片**：纯 Vector kernel 显示一个 AIV，
-MIX kernel 显示一个 AIC 和一个 AIV；当 `--sub-block-num=2` 时，Vector 侧显示为
-`AIV.0`、`AIV.1` 两个 sub-vector 执行单元。`--block-dim` 表示 Triton launch 的
-program instance 数量，并不表示界面中存在同样多个物理 AIV。解释器仍执行全部
-program 以保证最终 tensor 的数学验证完整，但记录文件和回放页只包含
+MIX kernel 显示一个 AIC 和一个代表性 AIV。`--sub-block-num=2` 时两个 Vector lane
+仍在解释器中参与调度、同步和数值计算，但前端只展示 lane 0，避免重复状态占用空间。
+`--block-dim` 表示 Triton launch 的 program instance 数量，并不表示界面中存在同样
+多个物理 AIV。解释器仍执行全部 program 以保证最终 tensor 的数学验证完整，但记录文件和回放页只包含
 `--debug-core` 所在 program 的核状态、向量时钟和片上内存；GM 等共享地址空间仍
 展示完整结果。界面始终提供 AIC 和 AIV 观察卡；纯 Vector kernel 没有实际 AIC
 entry，此时 AIC 明确显示为 `inactive` 且 pipe 均为 idle，不会伪造 AIC 任务。MIX
@@ -67,6 +67,43 @@ AIV/AIC 实际拥有的执行 pipe 进一步裁剪。HIVM 枚举中的 `MTE4`、
 是兼容/扩展枚举，不作为本调试目标上的独立硬件 pipe 展示或执行。同步面板会同时
 显示本步刚执行的 `set_flag`/`wait_flag`、仍排在生产 pipe 上的 pending token，以及
 已经发布但尚未消费的 semaphore。
+
+## 最小 AIC/AIV 逐步示例
+
+[`test/debug/mix-walkthrough.mlir`](../test/debug/mix-walkthrough.mlir) 只做一件事：AIC
+向共享 GM 写入 `42` 并发布跨核 Flag；AIV 等待该 Flag，读取 `42`，计算
+`42 + 1 = 43`，再写入输出。先在仓库根目录生成 session：
+
+```bash
+mkdir -p build/debug/mix-walkthrough
+build/bin/npuir-interp-debug test/debug/mix-walkthrough.mlir \
+  --sched=lazy \
+  --args=zeros,zeros \
+  --debug-core=AIV#0.0 \
+  --debug-output=build/debug/mix-walkthrough/mix-walkthrough.debug.jsonl \
+  --out=build/debug/mix-walkthrough/mix-walkthrough.
+python3 -m http.server 8000
+```
+
+打开以下地址：
+
+```text
+http://127.0.0.1:8000/tools/debug-ui/index.html?session=/build/debug/mix-walkthrough/mix-walkthrough.debug.jsonl
+```
+
+按事件号逐项核对：
+
+| 事件 | 应看到的内容 | 真实语义 |
+|---:|---|---|
+| 2 | AIV 为“等待 Flag”，AIV IR 高亮 `sync_block_wait` | AIV 在 AIC 发布前不能读取 mailbox |
+| 4 | 选择 AIC 后，`PIPE_S` 有一个 `memref.store`；GM `%arg0[0]` 为 `42` | AIC 已写入 mailbox，但跨核 Flag 尚未发布 |
+| 5 | 本步为 `sync_block_set`，AIV 恢复“可执行”，同步面板显示 AIC↔AIV Flag 代次 1 | AIC 正式发布数据可见性 |
+| 11 | 本步 SSA 输入为 `42`、`1`，输出为 `43` | AIV 完成唯一的算术运算 |
+| 12 | GM `%arg1[0]` 为 `43` | AIV 将最终结果写回 |
+
+该用例的 lit 检查还会直接读取 JSONL，验证阻塞对象、Pipe 任务、Flag 代次、SSA 值和
+内存补丁；最终 `.npy` 也必须为 `[43, 0, 0, 0]`。因此页面显示与解释器真实状态由
+同一组断言交叉验证。
 
 ## 从 DSL 用例一键运行
 
