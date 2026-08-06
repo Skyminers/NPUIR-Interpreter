@@ -2,3 +2,6 @@
 	path = third_party/AscendNPU-IR
 	url = https://gitcode.com/Ascend/AscendNPU-IR.git
 	branch = feature/regbase
+[submodule "third_party/triton-ascend"]
+	path = third_party/triton-ascend
+	url = https://github.com/Skyminers/triton-ascend.git

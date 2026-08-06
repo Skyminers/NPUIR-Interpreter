@@ -1,12 +1,17 @@
 # DSL E2E 环境
 
-这组测试需要 Triton Ascend 的发行包来完成 DSL → TTAdapter。推荐环境是：
+这组测试从仓库固定的 Triton Ascend 3.2.2 兼容源码构建 wheel，用它完成 DSL → TTAdapter。
+不需要再从额外的 Python 包索引下载 `triton-ascend`。推荐环境是：
 
 - Ubuntu Linux，x86_64 或 aarch64；
-- Python 3.12；
-- `triton-ascend==3.2.1`。
+- C/C++ 编译器和 Python 3.12；
+- CMake、Ninja、pybind11 等 Python 构建依赖由安装脚本准备。
 
-## 创建 venv 并安装发行包
+TA submodule 指向项目兼容 fork，并固定到与本仓库当前 BiSheng 接口匹配的提交
+`2c7d3bbf9ad5b3343db04701355cdce4370fe342`；安装脚本不会读取相邻目录或本机已有的
+TA checkout。
+
+## 从源码构建并安装
 
 在仓库根目录运行安装脚本：
 
@@ -15,14 +20,14 @@ test/dsl_e2e/setup_venv.sh
 source .venv/bin/activate
 ```
 
-脚本实际执行的手动安装步骤如下：
+脚本会完成以下步骤：
 
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r test/dsl_e2e/requirements.txt
-```
+1. 初始化 `third_party/triton-ascend` 及其嵌套 submodule；
+2. 创建 `.venv` 并安装构建依赖；
+3. 在 `build/ta-source/` 创建本地源码克隆，隔离 TA 构建时施加的临时补丁；
+4. 调用 TA 的 `python/setup.py bdist_wheel` 编译源码；
+5. 将 wheel 保存到 `build/ta-wheelhouse/<TA 提交>/`，再安装到 `.venv`；
+6. 导入 `libtriton` 及 DSL E2E 使用的编译 API，并确认原始 submodule 干净。
 
 需要指定其他 Python 3.10–3.13 解释器时设置 `NPUIR_PYTHON`，例如：
 
@@ -30,9 +35,15 @@ python -m pip install -r test/dsl_e2e/requirements.txt
 NPUIR_PYTHON=python3.11 test/dsl_e2e/setup_venv.sh
 ```
 
-`requirements.txt` 使用 Triton Ascend 官方包索引。pip 会根据当前 Python ABI 和
-CPU 架构下载对应 wheel，例如 Python 3.12/aarch64 会选择 `cp312`、`aarch64` 的
-manylinux wheel，不应手工安装其他 ABI 或架构的文件。
+如需把 venv 放到其他位置，可设置 `NPUIR_VENV`。TA 构建默认下载其源码提交固定的
+LLVM 工具链到仓库 `.cache/`；已有兼容 LLVM 安装时，可以通过 `LLVM_SYSPATH` 指定，
+从而进行离线构建：
+
+```bash
+LLVM_SYSPATH=/opt/ta-llvm \
+NPUIR_VENV=/opt/npuir-ta-venv \
+test/dsl_e2e/setup_venv.sh
+```
 
 安装后检查实际发行包和关键编译接口：
 
@@ -49,36 +60,35 @@ print("triton", triton.__version__, triton.__file__)
 PY
 ```
 
-不要在同一 venv 中另外安装或升级社区版 `triton`。两个发行包使用相同的顶层
-`triton` 目录，后安装的包可能覆盖 Triton Ascend 文件。
+安装脚本通过 requirements 显式安装 TA 的 Python 依赖，并对本地 TA wheel 使用
+`--no-deps`，因为该版本上游元数据还声明了社区版 `triton`，而两者使用相同的顶层
+`triton` 目录。不要在同一 venv 中另外安装或升级社区版 `triton`，否则其文件可能
+覆盖 Triton Ascend；`pip check` 因此会报告这一条已知的上游元数据冲突。
 
-## 离线下载
+## 复用和分发构建结果
 
-在一台与目标机具有相同 Linux 架构和 Python 版本的联网机器上运行：
+成功构建后，匹配当前 Python ABI 和平台的 wheel 位于：
 
 ```bash
-python3.12 -m pip download \
-  --dest wheelhouse \
-  --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple \
-  triton-ascend==3.2.1
+find build/ta-wheelhouse -name 'triton_ascend-*.whl'
 ```
 
-将整个 `wheelhouse` 复制到目标机后安装：
+可以把该 wheel 复制到具有相同 Python ABI、CPU 架构和系统 ABI 的机器，然后安装：
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install --no-index --find-links wheelhouse triton-ascend==3.2.1
+python -m pip install --no-deps build/ta-wheelhouse/2c7d3bbf/triton_ascend-*.whl
 ```
 
-必须复制整个目录，而不只是 `triton_ascend` wheel，因为其中还包含解析得到的依赖。
+离线从头构建时，需要预先提供 Python 构建依赖，并通过 `LLVM_SYSPATH` 指向兼容的
+LLVM 安装；设置 `TRITON_OFFLINE_BUILD=1` 可禁止 TA 构建脚本下载工具链。
 
 ## 平台限制
 
-官方 3.2.1 索引当前提供 Python 3.10–3.13 的 Linux x86_64/aarch64 wheel，另外提供
-Python 3.9/x86_64 wheel；不提供 macOS wheel。macOS 上不能直接安装 manylinux
-wheel，因为其中的 `libtriton` 是 Linux ELF 动态库。需要在 Linux 主机、Linux VM
-或 Linux 容器中运行 DSL E2E。
+源码构建产物与 Python ABI、操作系统和 CPU 架构绑定，不能跨平台复制。例如 macOS
+构建的 wheel 不能用于 Linux，x86_64 wheel 也不能用于 aarch64。用于发布的 wheel
+应在目标系统或与目标 ABI 一致的构建容器中生成。
 
 本仓库的 DSL E2E 只使用 Triton Ascend 生成 TTAdapter，不会执行 NPU kernel；因此
 没有 NPU 的 Linux 开发机也可以运行这条解释器验证链路。`npu-smi` 查询失败的提示

@@ -5,6 +5,52 @@
 步骤结束后会额外采集状态，因此调试器看到的就是实际执行状态，而不是二次推导的
 近似结果。
 
+## 统一 Web 入口
+
+在仓库根目录运行：
+
+```bash
+python3 tools/interpreter_web.py
+```
+
+浏览器会打开 `http://127.0.0.1:8000/tools/debug-ui/index.html`。这个入口包含两个功能：
+
+- **运行验证**：读取或粘贴一份 TTAdapter/HIVM MLIR，配置参数、调度和 AIC/AIV
+  拓扑后执行；页面展示下降状态、退出状态、耗时、输出 NPY 的 dtype/shape/数值预览，
+  并保留本次日志；
+- **日志重放**：加载任意 `debug.jsonl`，或在运行结束后点击“重放本次运行”，进入逐步
+  pipe、同步、SSA、IR 和内存调试工作台。
+
+“数学期望值”用于验证真实公式，而不是只比较两种调度结果。它按扁平顺序比较指定
+输出 arg 的前 N 个元素，并使用页面填写的 `atol`/`rtol`。留空时，页面只以
+Interpreter 自身的同步、竞争、死锁、越界检查和进程退出码判断成功。所有请求只发送
+到本机 `127.0.0.1`，后端不经过 shell，也不接受任意命令行参数或输出路径。
+
+参数既可以继续使用 `zeros`、`arange`、标量和本机 NPY 路径，也可以点击“选择参数
+NPY”。页面会把所选文件映射为 `@input0`、`@input1` 等本次运行专用 token，并自动
+放入参数列表；可以继续编辑列表，为输出 buffer 添加 `zeros`。上传文件只写入当前
+`build/web-runs/<run-id>/inputs/`，不会作为任意服务器路径使用。
+
+页面会在编辑器上方主动标识 IR 阶段。输入已经带有 `hacc.entry`、
+`hivm.func_core_type` 和 `hivm.module_core_type` 时直接执行；检测到 TTAdapter、tensor、
+Linalg、GPU 等未完全下降形式时，会自动调用
+[`test/lower_ttadapter_for_interp.py`](../test/lower_ttadapter_for_interp.py) 和
+`bishengir-compile`，生成 post-GraphSyncSolver HIVM 后再交给 Interpreter。结果区会
+单独展示下降状态和耗时，并允许下载生成的 `kernel.lowered.mlir`，或把它重新载入左侧
+编辑器继续检查和运行。
+
+自定义端口、二进制和运行超时时间：
+
+```bash
+python3 tools/interpreter_web.py \
+  --port 8127 \
+  --interpreter build/bin/npuir-interp-debug \
+  --compiler build/bin/bishengir-compile \
+  --timeout 120
+```
+
+每次运行的源码、输出 NPY 和 JSONL 默认保存在 `build/web-runs/<run-id>/`。
+
 ## 生成调试会话
 
 ```bash
@@ -32,8 +78,9 @@ debug 二进制未显式指定 `--debug-output` 时默认写入当前目录的
 
 ## 打开界面
 
-直接用浏览器打开 [`tools/debug-ui/index.html`](../tools/debug-ui/index.html)，点击
-“加载调试会话”并选择 JSONL 文件即可。文件由浏览器本地读取，不会上传。
+直接用浏览器打开 [`tools/debug-ui/index.html`](../tools/debug-ui/index.html)，切换到
+“日志重放”并选择 JSONL 文件也可以离线使用。文件由浏览器本地读取，不会上传；此时
+“运行验证”会明确显示后端未连接。
 
 也可以启动一个本地静态服务器：
 
@@ -151,6 +198,7 @@ program instance，而不是在调试模型中创建 32 个物理 AIV。默认�
 
 ## 当前边界
 
-首版是确定性的离线回放调试器，不会暂停正在运行的解释器进程。它适合定位 pipe
-提交、同步和数值变化发生在哪一步。后续若需要交互式断点，可在同一状态模型之上增加
-进程控制协议，不需要更改前端对 session state 的理解。
+当前运行入口以一次完整执行为单位，调试工作台随后重放持久化日志；它不会暂停正在
+运行的解释器进程。该模式适合先确认数值与运行期检查，再定位 pipe 提交、同步和数值
+变化发生在哪一步。后续若需要交互式断点，可在同一状态模型之上增加进程控制协议，
+不需要更改前端对 session state 的理解。

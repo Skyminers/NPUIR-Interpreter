@@ -2,6 +2,17 @@
 
 const byId = (id) => document.getElementById(id);
 const ui = {
+  showRun: byId("show-run"), showReplay: byId("show-replay"), loadSession: byId("load-session-button"),
+  runView: byId("run-view"), replayView: byId("replay-view"), backendStatus: byId("backend-status"),
+  runForm: byId("run-form"), kernelFile: byId("kernel-file"), kernelFileName: byId("kernel-file-name"), kernelSource: byId("kernel-source"),
+  irStage: byId("ir-stage-status"), argumentFiles: byId("argument-files"), argumentFileList: byId("argument-file-list"),
+  runArgs: byId("run-args"), runBlockDim: byId("run-block-dim"), runSubBlock: byId("run-sub-block"), runGmElems: byId("run-gm-elems"),
+  runSched: byId("run-sched"), runSeed: byId("run-seed"), runDebugCore: byId("run-debug-core"), runArch: byId("run-arch"), runSubmit: byId("run-submit"),
+  expectedValues: byId("expected-values"), expectedArg: byId("expected-arg"), expectedAtol: byId("expected-atol"), expectedRtol: byId("expected-rtol"),
+  runResult: byId("run-result"), runResultTitle: byId("run-result-title"), runResultDetail: byId("run-result-detail"),
+  loweringResult: byId("lowering-result"), loweringTitle: byId("lowering-title"), loweringDetail: byId("lowering-detail"),
+  downloadLowered: byId("download-lowered"), loadLowered: byId("load-lowered"),
+  outputResults: byId("output-results"), processOutput: byId("process-output"), replayRun: byId("replay-run"),
   file: byId("session-file"), empty: byId("empty-state"), debugger: byId("debugger"),
   timeline: byId("timeline"), current: byId("step-current"), total: byId("step-total"),
   first: byId("first"), previous: byId("previous"), play: byId("play"), next: byId("next"), last: byId("last"),
@@ -24,6 +35,10 @@ let memory = new Map();
 let replayedThrough = -1;
 let highlightedIrLines = {AIC: 0, AIV: 0};
 let lastExecutedIrLines = {AIC: [], AIV: []};
+let backendAvailable = false;
+let latestSessionUrl = null;
+let latestLoweredUrl = null;
+let selectedArgumentFiles = [];
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -132,6 +147,226 @@ function activateSession(text) {
   render();
 }
 
+function selectMode(mode) {
+  const replay = mode === "replay";
+  ui.runView.hidden = replay;
+  ui.replayView.hidden = !replay;
+  ui.loadSession.hidden = !replay;
+  ui.showRun.classList.toggle("active", !replay);
+  ui.showReplay.classList.toggle("active", replay);
+}
+
+ui.showRun.addEventListener("click", () => selectMode("run"));
+ui.showReplay.addEventListener("click", () => selectMode("replay"));
+
+ui.kernelFile.addEventListener("change", async () => {
+  const file = ui.kernelFile.files[0];
+  if (!file) return;
+  ui.kernelSource.value = await file.text();
+  ui.kernelFileName.textContent = `${file.name} · ${(file.size / 1024).toFixed(1)} KiB`;
+  updateIrStage();
+});
+
+function detectIrStage(source) {
+  if (!source.trim()) return "empty";
+  if (["global_kernel", "tensor<", "tensor.", "bufferization.", "linalg.", "gpu.", "hfusion."].some((marker) => source.includes(marker))) return "ttadapter";
+  if (["hacc.entry", "hivm.func_core_type", "hivm.module_core_type"].every((marker) => source.includes(marker))) return "hivm";
+  return "unlowered";
+}
+
+function updateIrStage() {
+  const stage = detectIrStage(ui.kernelSource.value);
+  ui.irStage.className = `ir-stage-status ${stage}`;
+  ui.irStage.textContent = ({
+    empty: "等待 IR",
+    hivm: "已完全下降 · 可直接执行",
+    ttadapter: "检测到 TTAdapter · 运行时将自动下降",
+    unlowered: "IR 尚未完全下降 · 运行时将自动下降"
+  })[stage];
+}
+
+ui.kernelSource.addEventListener("input", updateIrStage);
+
+ui.argumentFiles.addEventListener("change", () => {
+  const files = Array.from(ui.argumentFiles.files ?? []);
+  const specs = ui.runArgs.value.split(",").map((spec) => spec.trim()).filter(Boolean);
+  const withoutOldUploads = specs.filter((spec) => !/^@input\d+$/.test(spec));
+  if (!selectedArgumentFiles.length) withoutOldUploads.splice(0, Math.min(files.length, withoutOldUploads.length));
+  selectedArgumentFiles = files;
+  const tokens = files.map((_file, index) => `@input${index}`);
+  ui.runArgs.value = [...tokens, ...withoutOldUploads].join(",");
+  ui.argumentFileList.innerHTML = files.length
+    ? files.map((file, index) => `<span><code>@input${index}</code>${escapeHtml(file.name)}<small>${(file.size / 1024).toFixed(1)} KiB</small></span>`).join("")
+    : "<span>尚未选择参数文件</span>";
+});
+
+function fileBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
+    reader.onerror = () => reject(reader.error ?? new Error(`无法读取 ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function parseExpectedValues(text) {
+  if (!text.trim()) return null;
+  const values = text.trim().split(/[\s,]+/).filter(Boolean).map(Number);
+  if (!values.length || values.some((value) => !Number.isFinite(value))) {
+    throw new Error("数学期望值只能包含以逗号或空白分隔的有限数字");
+  }
+  return {
+    arg: Number(ui.expectedArg.value), values,
+    atol: Number(ui.expectedAtol.value), rtol: Number(ui.expectedRtol.value)
+  };
+}
+
+function outputCard(output) {
+  const shape = output.shape.length ? `[${output.shape.join(", ")}]` : "scalar";
+  const preview = output.preview?.length
+    ? output.preview.map((value, index) => `<span><small>${index}</small>${escapeHtml(value)}</span>`).join("")
+    : `<p class="muted">${escapeHtml(output.preview_error ?? "无可预览数据")}</p>`;
+  return `<article class="panel output-card">
+    <div class="output-card-head">
+      <div><p class="eyebrow">ARG ${output.arg}</p><h2>${escapeHtml(output.name)}</h2></div>
+      <a href="${escapeHtml(output.url)}" download>下载 NPY</a>
+    </div>
+    <div class="output-meta"><span>dtype <strong>${escapeHtml(output.dtype)}</strong></span><span>shape <strong>${escapeHtml(shape)}</strong></span><span>元素 <strong>${output.count}</strong></span></div>
+    <div class="value-preview">${preview}</div>
+  </article>`;
+}
+
+function renderRunResult(result) {
+  const passed = result.status === "passed";
+  ui.runResult.hidden = false;
+  ui.runResult.classList.toggle("passed", passed);
+  ui.runResult.classList.toggle("failed", !passed);
+  ui.runResultTitle.textContent = passed ? "运行验证通过" : "运行验证失败";
+  const lowerTime = result.lowering?.performed ? ` · 自动下降 ${result.lowering.duration_ms} ms` : "";
+  ui.runResultDetail.textContent = `${result.process.duration_ms} ms · 进程 ${result.process.status}${lowerTime} · ${result.verification.message}`;
+  const lowering = result.lowering;
+  ui.loweringResult.hidden = !lowering;
+  if (lowering) {
+    ui.loweringResult.className = `panel lowering-result ${lowering.status}`;
+    ui.loweringTitle.textContent = lowering.performed
+      ? (lowering.status === "passed" ? "自动下降完成" : "自动下降失败")
+      : "无需自动下降";
+    ui.loweringDetail.textContent = lowering.message;
+    latestLoweredUrl = lowering.source_url;
+    ui.downloadLowered.hidden = !latestLoweredUrl;
+    ui.loadLowered.hidden = !latestLoweredUrl;
+    if (latestLoweredUrl) ui.downloadLowered.href = latestLoweredUrl;
+  }
+  ui.outputResults.innerHTML = result.outputs.length
+    ? result.outputs.map(outputCard).join("")
+    : '<div class="panel no-output">没有生成输出 NPY</div>';
+  const lowerCommand = lowering?.command?.length
+    ? `$ ${lowering.command.map((part) => JSON.stringify(part)).join(" ")}\n${lowering.stdout}${lowering.stderr}\n\n`
+    : "";
+  const command = result.process.command.map((part) => JSON.stringify(part)).join(" ");
+  const runLog = command ? `$ ${command}\n${result.process.stdout}${result.process.stderr}` : "Interpreter 未启动";
+  ui.processOutput.textContent = `${lowerCommand}${runLog}`.trim();
+  latestSessionUrl = result.session_url;
+  ui.replayRun.disabled = !latestSessionUrl;
+  ui.runResult.scrollIntoView({behavior: "smooth", block: "start"});
+}
+
+ui.loadLowered.addEventListener("click", async () => {
+  if (!latestLoweredUrl) return;
+  try {
+    const response = await fetch(latestLoweredUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    ui.kernelSource.value = await response.text();
+    ui.kernelFileName.textContent = "已载入本次自动下降结果";
+    updateIrStage();
+    ui.kernelSource.scrollIntoView({behavior: "smooth", block: "center"});
+  } catch (error) {
+    window.alert(`无法载入下降后 IR：${error.message}`);
+  }
+});
+
+ui.runForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!backendAvailable) {
+    window.alert("当前页面没有连接到 Interpreter Web 服务，请使用 tools/interpreter_web.py 启动");
+    return;
+  }
+  let expected;
+  try { expected = parseExpectedValues(ui.expectedValues.value); }
+  catch (error) { window.alert(error.message); return; }
+  let inputFiles;
+  try {
+    inputFiles = await Promise.all(selectedArgumentFiles.map(async (file) => ({
+      name: file.name, data: await fileBase64(file)
+    })));
+  } catch (error) {
+    window.alert(`参数文件读取失败：${error.message}`);
+    return;
+  }
+  const payload = {
+    source: ui.kernelSource.value,
+    args: ui.runArgs.value,
+    arch: ui.runArch.value,
+    input_files: inputFiles,
+    block_dim: Number(ui.runBlockDim.value),
+    sub_block_num: Number(ui.runSubBlock.value),
+    dyn_gm_elems: Number(ui.runGmElems.value),
+    sched: ui.runSched.value,
+    seed: Number(ui.runSeed.value),
+    debug_core: ui.runDebugCore.value,
+    expected
+  };
+  ui.runSubmit.disabled = true;
+  ui.runSubmit.textContent = "正在运行…";
+  try {
+    const response = await fetch("/api/run", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
+    renderRunResult(result);
+  } catch (error) {
+    window.alert(`运行失败：${error.message}`);
+  } finally {
+    ui.runSubmit.disabled = false;
+    ui.runSubmit.textContent = "运行并生成调试日志";
+  }
+});
+
+async function loadSessionFromUrl(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  activateSession(await response.text());
+  selectMode("replay");
+}
+
+ui.replayRun.addEventListener("click", async () => {
+  if (!latestSessionUrl) return;
+  try { await loadSessionFromUrl(latestSessionUrl); }
+  catch (error) { window.alert(`无法加载本次调试日志：${error.message}`); }
+});
+
+async function discoverBackend() {
+  try {
+    const response = await fetch("/api/config");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const config = await response.json();
+    backendAvailable = Boolean(config.available);
+    ui.backendStatus.textContent = backendAvailable
+      ? (config.compiler_available ? "Interpreter 与自动下降已就绪" : "Interpreter 已就绪 · 自动下降不可用")
+      : "未找到 Interpreter 二进制";
+    ui.backendStatus.className = `backend-status ${backendAvailable ? "ready" : "unavailable"}`;
+    ui.runSubmit.disabled = !backendAvailable;
+  } catch (_error) {
+    backendAvailable = false;
+    ui.backendStatus.textContent = "仅重放模式 · 请通过 interpreter_web.py 启动";
+    ui.backendStatus.className = "backend-status unavailable";
+    ui.runSubmit.disabled = true;
+  }
+}
+
+discoverBackend();
+
 ui.file.addEventListener("change", async () => {
   const file = ui.file.files[0];
   if (!file) return;
@@ -146,9 +381,7 @@ async function autoloadSession() {
   const session = new URLSearchParams(window.location.search).get("session");
   if (!session) return;
   try {
-    const response = await fetch(session);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    activateSession(await response.text());
+    await loadSessionFromUrl(session);
   } catch (error) {
     window.alert(`无法加载调试会话 ${session}：${error.message}`);
   }

@@ -13,9 +13,7 @@ NPUIR Interpreter 是面向 **memref-form NPUIR（HIVM）** 的 CPU 解释器。
 - 使用 APInt/APFloat 覆盖 f16、bf16、f8 等低精度数值路径；
 - 读取和输出 `.npy`，便于与 NumPy、PyTorch golden 结果比较。
 
-解释器运行时不依赖 Ascend 硬件。源码构建依赖仓库固定版本的 AscendNPU-IR
-submodule，以及该 submodule 固定的 LLVM/MLIR 版本。
-
+解释器运行时不依赖 Ascend 硬件。
 ## 整体架构
 
 ![Architecture](images/Architecture.png)
@@ -36,6 +34,7 @@ submodule，以及该 submodule 固定的 LLVM/MLIR 版本。
 | `test/` | lit 功能、同步、竞争、死锁、越界、layout 和错误用例 |
 | `test/Precision/` | 独立的低精度逐位扫描工具 |
 | `third_party/AscendNPU-IR/` | 固定版本的 AscendNPU-IR submodule |
+| `third_party/triton-ascend/` | 固定版本的 Triton Ascend submodule |
 | `build.sh` | LLVM external project 的配置、构建与测试入口 |
 
 ## 获取源码
@@ -71,14 +70,12 @@ cmake --build build --target check-npuir-interpreter-unit
 cmake --build build --target check-npuir-interpreter-precision
 ```
 
-DSL E2E 需要在 Linux Python 3.12 venv 中安装 Triton Ascend 官方发行包：
-
 ```bash
 test/dsl_e2e/setup_venv.sh
 source .venv/bin/activate
 ```
 
-官方包目前没有 macOS wheel；完整的平台选择、离线下载和排障说明见
+构建环境、LLVM 缓存、自定义 Python 和排障说明见
 [DSL E2E 环境文档](test/dsl_e2e/README.md)。安装后运行全部用例：
 
 ```bash
@@ -114,7 +111,15 @@ build/bin/npuir-interp kernel.mlir \
   --out=out.
 ```
 
-生成并可视化回放调试会话：
+启动统一的运行与调试 Web 入口：
+
+```bash
+python3 tools/interpreter_web.py
+```
+
+页面既可以选择 NPY 参数并直接运行 HIVM/MLIR、预览输出并按 `atol`/`rtol` 比较数学
+期望值，也会识别未完全下降的 TTAdapter IR，自动生成可下载的 post-GraphSyncSolver
+HIVM。运行后可以一键重放本次执行或加载历史 JSONL。命令行生成调试会话仍然可用：
 
 ```bash
 build/bin/npuir-interp-debug kernel.mlir \
@@ -122,9 +127,9 @@ build/bin/npuir-interp-debug kernel.mlir \
   --debug-output=npuir-debug.jsonl
 ```
 
-随后用浏览器打开 [`tools/debug-ui/index.html`](tools/debug-ui/index.html) 并加载该
-JSONL 文件。调试器可逐步观察每条 pipe 的任务、core 阻塞、flag/barrier 以及任意
-arena 地址的实际字节值。详细说明见[可视化调试器文档](docs/Debugger_zh.md)。
+随后切换到 Web 页的“日志重放”并加载该 JSONL。调试器可逐步观察每条 pipe 的任务、
+core 阻塞、flag/barrier 以及任意 arena 地址的实际字节值。详细说明见
+[可视化调试器文档](docs/Debugger_zh.md)。
 
 完整参数、调度模式和诊断示例见[中文使用指南](docs/Usage_zh.md)。实现原理见
 [中文架构文档](docs/Architecture_zh.md)或[English architecture](docs/Architecture.md)；
@@ -133,9 +138,12 @@ arena 地址的实际字节值。详细说明见[可视化调试器文档](docs/
 ## 依赖版本
 
 AscendNPU-IR 通过 `third_party/AscendNPU-IR` submodule 固定到来源分支
-`feature/regbase` 的提交 `5a744afc17c0caa6833cf04f773898450041ff98`。不要通过
-复制生成头文件或混用其他 LLVM 构建目录替换它。升级依赖时应提交新的 gitlink，
-并运行完整回归与低精度逐位扫描。
+`feature/regbase` 的提交 `5a744afc17c0caa6833cf04f773898450041ff98`；Triton Ascend
+通过 `third_party/triton-ascend` 固定到 v3.2.2 兼容线的提交
+`2c7d3bbf9ad5b3343db04701355cdce4370fe342`。该提交来自项目兼容 fork，保留与当前
+BiShengIR 匹配的 TTAdapter 接口，同时包含 macOS 源码构建修复。不要通过复制生成
+头文件或混用其他 LLVM 构建目录替换它们。升级依赖时应提交新的 gitlink，并运行
+DSL E2E、完整回归与低精度逐位扫描。
 
 ## License
 

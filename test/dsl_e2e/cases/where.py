@@ -17,7 +17,7 @@ def kernel(x_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 
 
 CASE = E2ECase(
-    name="select",
+    name="where",
     kernel=kernel,
     signature={
         "x_ptr": "*fp32",

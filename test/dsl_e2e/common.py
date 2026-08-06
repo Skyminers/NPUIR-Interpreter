@@ -214,8 +214,7 @@ def run_debug_case(case: E2ECase, args: argparse.Namespace) -> pathlib.Path:
 
 
 def serve_debug_session(session: pathlib.Path, args: argparse.Namespace) -> None:
-    import functools
-    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    import importlib.util
     import urllib.parse
     import webbrowser
 
@@ -231,14 +230,20 @@ def serve_debug_session(session: pathlib.Path, args: argparse.Namespace) -> None
         f"http://127.0.0.1:{args.port}/tools/debug-ui/index.html"
         f"?session={query}"
     )
-    class NoCacheHandler(SimpleHTTPRequestHandler):
-        def end_headers(self) -> None:
-            self.send_header("Cache-Control", "no-store")
-            super().end_headers()
-
-    handler = functools.partial(NoCacheHandler, directory=root)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    print(f"Debugger UI: {url}", flush=True)
+    web_module_path = root / "tools" / "interpreter_web.py"
+    spec = importlib.util.spec_from_file_location("interpreter_web", web_module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load Interpreter Web server: {web_module_path}")
+    web = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(web)
+    web_artifacts = root / "build" / "web-runs"
+    web_artifacts.mkdir(parents=True, exist_ok=True)
+    server = web.InterpreterWebServer(
+        ("127.0.0.1", args.port), root, args.debugger.resolve(),
+        args.compiler.resolve(),
+        web_artifacts, 120.0,
+    )
+    print(f"Interpreter Web UI: {url}", flush=True)
     print("Press Ctrl-C to stop the local server.", flush=True)
     if not args.no_open:
         webbrowser.open(url)

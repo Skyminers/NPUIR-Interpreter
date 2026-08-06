@@ -8,24 +8,125 @@
 </head>
 <body>
   <header class="topbar">
-    <div>
+    <div class="brand">
       <p class="eyebrow">NPUIR INTERPRETER</p>
       <h1>计算模拟可视化</h1>
     </div>
-    <label class="load-button">
+    <nav class="mode-switch" aria-label="功能入口">
+      <button id="show-run" class="mode-button active" type="button">运行验证</button>
+      <button id="show-replay" class="mode-button" type="button">日志重放</button>
+    </nav>
+    <label id="load-session-button" class="load-button" hidden>
       加载日志
       <input id="session-file" type="file" accept=".jsonl,.json">
     </label>
   </header>
 
   <main>
-    <section id="empty-state" class="empty-state">
-      <div class="empty-mark">⌁</div>
-      <h2>加载 npuir-debug.jsonl 开始回放</h2>
-      <p>调试日志由 <code>npuir-interp-debug</code> 生成，本页面仅重放。</p>
+    <section id="run-view" class="run-view">
+      <section class="run-hero">
+        <div>
+          <p class="eyebrow">RUN &amp; VERIFY</p>
+          <h2>运行 kernel，并确认执行与数值结果</h2>
+          <p>每次运行都会保留输出 NPY 和可重放日志。数学期望值为可选项，但建议在验证算子时填写。</p>
+        </div>
+        <span id="backend-status" class="backend-status checking">正在连接本地服务…</span>
+      </section>
+
+      <form id="run-form" class="run-layout">
+        <section class="panel source-editor-panel">
+          <div class="section-heading">
+            <div><p class="eyebrow">KERNEL INPUT</p><h2>HIVM / MLIR</h2></div>
+            <label class="quiet-file-button">读取文件<input id="kernel-file" type="file" accept=".mlir,.ttadapter"></label>
+          </div>
+          <div class="source-meta-row">
+            <div id="kernel-file-name" class="source-file-name">尚未选择文件；也可以直接粘贴源码</div>
+            <span id="ir-stage-status" class="ir-stage-status empty">等待 IR</span>
+          </div>
+          <textarea id="kernel-source" class="source-editor" spellcheck="false" placeholder="module attributes { ... }"></textarea>
+        </section>
+
+        <aside class="run-config-column">
+          <section class="panel run-config-panel">
+            <div class="section-heading compact-heading">
+              <div><p class="eyebrow">EXECUTION</p><h2>运行配置</h2></div>
+            </div>
+            <label class="field full">参数输入
+              <input id="run-args" value="zeros,zeros" placeholder="arange,zeros,1.0">
+              <small>与 CLI 的 <code>--args</code> 相同；所选 NPY 使用 <code>@input0</code>、<code>@input1</code> 引用</small>
+            </label>
+            <div class="argument-files">
+              <label class="argument-file-button">选择参数 NPY
+                <input id="argument-files" type="file" accept=".npy" multiple>
+              </label>
+              <div id="argument-file-list" class="argument-file-list"><span>尚未选择参数文件</span></div>
+            </div>
+            <div class="field-grid">
+              <label class="field">Block 数<input id="run-block-dim" type="number" min="1" value="1"></label>
+              <label class="field">AIV 子核数<select id="run-sub-block"><option value="1">1</option><option value="2">2</option></select></label>
+              <label class="field">动态 GM 元素数<input id="run-gm-elems" type="number" min="1" value="4096"></label>
+              <label class="field">调度策略<select id="run-sched"><option value="lazy">lazy</option><option value="inorder">inorder</option><option value="fuzz">fuzz</option></select></label>
+              <label class="field">随机种子<input id="run-seed" type="number" min="0" value="0"></label>
+              <label class="field">调试切片<input id="run-debug-core" value="AIV#0.0"></label>
+              <label class="field">下降目标<input id="run-arch" value="Ascend910B4"></label>
+            </div>
+          </section>
+
+          <section class="panel run-config-panel">
+            <div class="section-heading compact-heading">
+              <div><p class="eyebrow">NUMERICAL ORACLE</p><h2>数学期望值（可选）</h2></div>
+            </div>
+            <label class="field full">输出前缀
+              <textarea id="expected-values" rows="3" placeholder="例如：43, 0, 0, 0"></textarea>
+              <small>按扁平顺序比较填写的前 N 项；留空表示只判断 Interpreter 是否成功</small>
+            </label>
+            <div class="field-grid three">
+              <label class="field">输出 arg<input id="expected-arg" type="number" min="0" value="1"></label>
+              <label class="field">atol<input id="expected-atol" type="number" min="0" step="any" value="0"></label>
+              <label class="field">rtol<input id="expected-rtol" type="number" min="0" step="any" value="0"></label>
+            </div>
+          </section>
+
+          <button id="run-submit" class="run-submit" type="submit">运行并生成调试日志</button>
+        </aside>
+      </form>
+
+      <section id="run-result" class="run-result" hidden>
+        <div class="result-summary panel">
+          <div>
+            <p class="eyebrow">RUN RESULT</p>
+            <h2 id="run-result-title">—</h2>
+            <p id="run-result-detail">—</p>
+          </div>
+          <button id="replay-run" class="primary" type="button" disabled>重放本次运行</button>
+        </div>
+        <section id="lowering-result" class="panel lowering-result" hidden>
+          <div>
+            <p class="eyebrow">AUTO LOWERING</p>
+            <h2 id="lowering-title">—</h2>
+            <p id="lowering-detail">—</p>
+          </div>
+          <div class="lowering-actions">
+            <a id="download-lowered" class="button-link" href="#" download hidden>下载下降后 IR</a>
+            <button id="load-lowered" type="button" hidden>载入编辑器</button>
+          </div>
+        </section>
+        <div id="output-results" class="output-results"></div>
+        <details class="panel process-log">
+          <summary>Interpreter 输出</summary>
+          <pre id="process-output"></pre>
+        </details>
+      </section>
     </section>
 
-    <div id="debugger" hidden>
+    <section id="replay-view" hidden>
+      <section id="empty-state" class="empty-state">
+        <div class="empty-mark">⌁</div>
+        <h2>加载 debug.jsonl 开始重放</h2>
+        <p>可以加载历史日志，也可以从“运行验证”直接进入本次执行记录。</p>
+      </section>
+
+      <div id="debugger" hidden>
       <section class="transport panel">
         <div class="transport-buttons">
           <button id="first" class="icon-button" title="回到开始" aria-label="回到开始">|◀</button>
@@ -120,7 +221,8 @@
           <div id="memory" class="hex-view"></div>
         </div>
       </details>
-    </div>
+      </div>
+    </section>
   </main>
 
   <script src="app.js"></script>
